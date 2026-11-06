@@ -1,5 +1,5 @@
 //! Test policies. They read the declaration crate only, never the engine, as
-//! the real test bots will.
+//! the real test bots in REPOS/BOTS will.
 
 #![allow(dead_code)]
 

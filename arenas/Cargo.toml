@@ -6,7 +6,7 @@
 # - native:                 tests, and the hook check
 #
 # Each arena's crates are listed under `members`, between the markers below,
-# by the authoring tools (`arena:new` adds them, `arena:remove` takes them out, and
+# by REPOS/TOOLS (`arena:new` adds them, `arena:remove` takes them out, and
 # its checks fail if the list and catalog/ disagree). They aren't globs
 # because Cargo reads a glob that matches nothing as a literal path, which
 # breaks the workspace whenever the catalog is empty.

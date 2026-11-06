@@ -3,12 +3,7 @@
 //!
 //! - `wasm32-wasip2`: wasi-sdk's clang and llvm-ar, from `WASI_SDK_PATH` or
 //!   ARENAS's `.toolchain/wasi-sdk-33` (`task toolchain:wasi-sdk` fetches it).
-//! - native: the host C toolchain, for native tests of the kits and engines,
-//!   with floating-point contraction off: clang fuses `a*b+c` into one FMA on
-//!   aarch64 by default, and wasm (which has no FMA) never does, so without
-//!   it a native run computes slightly different physics from the arena that
-//!   ships. The wasm build is left exactly as it is: the flag changes most of
-//!   its objects, and so every arena's digest.
+//! - native: the host C toolchain, for native tests of the kits and engines.
 
 use std::env;
 use std::path::PathBuf;
@@ -42,15 +37,7 @@ fn main() {
             .flag(format!(
                 "--sysroot={}",
                 sdk.join("share/wasi-sysroot").display()
-            ))
-            // No path of this machine reaches the engine (MuJoCo's error
-            // macros name their source file): the same source gives the
-            // same arena wherever it's checked out.
-            .flag(format!(
-                "-ffile-prefix-map={}=mujoco-sys",
-                manifest.display()
-            ))
-            .flag(format!("-ffile-prefix-map={}=wasi-sdk", sdk.display()));
+            ));
     }
 
     build
@@ -81,9 +68,6 @@ fn main() {
 
     for file in ["ccd", "mpr", "polytope", "support", "vec3"] {
         build.file(ccd.join(format!("{file}.c")));
-    }
-    if !target.starts_with("wasm32") {
-        build.flag_if_supported("-ffp-contract=off");
     }
     build.file(manifest.join("csrc/wasi_stubs.c"));
     build.file(manifest.join("csrc/shim.c"));

@@ -9,7 +9,7 @@
 //! - the scripted baseline beats random on most seeds ([`win_rate`])
 //! - outcomes spread ([`Spread`])
 //!
-//! Test bots live in the house bots' repository and never link an engine; the policies here
+//! Test bots live in REPOS/BOTS and never link an engine; the policies here
 //! are the built-in no-op, random and extreme seats the tools also use.
 
 use botstadia_interface::declaration::Declaration;

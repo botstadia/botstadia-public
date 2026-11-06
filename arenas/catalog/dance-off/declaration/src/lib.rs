@@ -8,7 +8,7 @@ use arena_kit::declaration::*;
 use arena_kit::{EventKey, SeriesKey, StatKey};
 
 /// The arena version: bump it, with a changelog entry, for every engine change.
-pub const VERSION: &str = "0.2.1";
+pub const VERSION: &str = "0.2.0";
 /// The payload schema: 2 adds the beat's period to `dance`.
 pub const SCHEMA: u32 = 2;
 
@@ -1290,8 +1290,7 @@ pub fn declaration() -> Declaration {
         arena_id: "dance-off".into(),
         arena_version: VERSION.into(),
         changelog: vec![
-            ChangelogEntry { version: VERSION.into(), changes: "The same engine, built reproducibly in Docker from its public source and tagged there by digest: no path of the machine that built it reaches the wasm. Rules, inputs and outputs unchanged.".into() },
-            ChangelogEntry { version: "0.2.0".into(), changes: "The seed draws the tempo, 84 to 150 beats a minute, and the routine is built from phrases over twenty moves, ten of them new, rising in difficulty; windows are in beats. `dance` gains the beat's period (payload schema 2); form is the score as a share of the routine's most.".into() },
+            ChangelogEntry { version: VERSION.into(), changes: "The seed draws the tempo, 84 to 150 beats a minute, and the routine is built from phrases over twenty moves, ten of them new, rising in difficulty; windows are in beats. `dance` gains the beat's period (payload schema 2); form is the score as a share of the routine's most.".into() },
             ChangelogEntry { version: "0.1.0".into(), changes: "First version.".into() },
         ],
         payload_schema_version: SCHEMA,

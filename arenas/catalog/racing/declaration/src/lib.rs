@@ -7,7 +7,7 @@ use arena_kit::declaration::*;
 use arena_kit::{EventKey, SeriesKey, StatKey};
 
 /// The arena version: bump it, with a changelog entry, for every engine change.
-pub const VERSION: &str = "0.2.1";
+pub const VERSION: &str = "0.2.0";
 /// The payload schema: 2 adds gate velocities and the obstacles.
 pub const SCHEMA: u32 = 2;
 
@@ -103,8 +103,7 @@ pub fn declaration() -> Declaration {
         arena_id: "racing".into(),
         arena_version: VERSION.into(),
         changelog: vec![
-            ChangelogEntry { version: VERSION.into(), changes: "The same engine, built reproducibly in Docker from its public source and tagged there by digest: no path of the machine that built it reaches the wasm. Rules, inputs and outputs unchanged.".into() },
-            ChangelogEntry { version: "0.2.0".into(), changes: "The seed lays the course out every session: a stadium or a kidney of drawn size, gates spread, raised, offset and turned, two to four of them swaying or bobbing, and three to eight obstacle spheres drifting or orbiting beside the line. The start is the same every time. Inputs gain each gate's velocity and the obstacles (payload schema 2); form is average speed.".into() },
+            ChangelogEntry { version: VERSION.into(), changes: "The seed lays the course out every session: a stadium or a kidney of drawn size, gates spread, raised, offset and turned, two to four of them swaying or bobbing, and three to eight obstacle spheres drifting or orbiting beside the line. The start is the same every time. Inputs gain each gate's velocity and the obstacles (payload schema 2); form is average speed.".into() },
             ChangelogEntry { version: "0.1.0".into(), changes: "First version.".into() },
         ],
         payload_schema_version: SCHEMA,

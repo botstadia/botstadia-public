@@ -12,7 +12,7 @@ What is NOT here: the model compiler (`src/user`, `src/xml`), renderer
 (`src/render`), UI, plugins, and the three C++ files in `src/engine`
 (`engine_thread.cc`, `engine_plugin.cc`, `engine_crossplatform.cc`), whose
 single-threaded / no-plugin replacements live in
-`shared/mujoco-sys/csrc/wasi_stubs.c`. Models are compiled to `.mjb` at bake time with the real MuJoCo (the authoring tools'
+`shared/mujoco-sys/csrc/wasi_stubs.c (in REPOS/ARENAS)`. Models are compiled to `.mjb` at bake time with the real MuJoCo (REPOS/TOOLS
 `bake-model`, Python `mujoco==3.11.0`) and loaded here with
 `mj_loadModelBuffer`: pure C, no VFS, no XML.
 

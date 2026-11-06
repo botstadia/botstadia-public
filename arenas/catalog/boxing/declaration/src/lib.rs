@@ -7,7 +7,7 @@ use arena_kit::declaration::*;
 use arena_kit::{EventKey, SeriesKey, StatKey};
 
 /// The arena version: bump it, with a changelog entry, for every engine change.
-pub const VERSION: &str = "0.3.1";
+pub const VERSION: &str = "0.3.0";
 /// The payload schema: 2 adds the `motors` input. A new schema is a new ladder.
 pub const SCHEMA: u32 = 2;
 
@@ -234,8 +234,7 @@ pub fn declaration() -> Declaration {
         arena_id: "boxing".into(),
         arena_version: VERSION.into(),
         changelog: vec![
-            ChangelogEntry { version: VERSION.into(), changes: "The same engine, built reproducibly in Docker from its public source and tagged there by digest: no path of the machine that built it reaches the wasm. Rules, inputs and outputs unchanged.".into() },
-            ChangelogEntry { version: "0.3.0".into(), changes: "Impact scoring: a punch is judged over its whole contact at its peak force, and harder punches score more: a solid punch (101 N) one point more, a power punch (159 N) two more. A power-punch event, power-punch and hardest-punch stats, and each landing's strength in the replay frame. Inputs unchanged.".into() },
+            ChangelogEntry { version: VERSION.into(), changes: "Impact scoring: a punch is judged over its whole contact at its peak force, and harder punches score more: a solid punch (101 N) one point more, a power punch (159 N) two more. A power-punch event, power-punch and hardest-punch stats, and each landing's strength in the replay frame. Inputs unchanged.".into() },
             ChangelogEntry { version: "0.2.0".into(), changes: "Boxing gloves: a padded 0.23 kg glove on each wrist, which is what lands a punch (a lower landing force for padded contact) and what the fists' positions report. Stamina: each motor heats with the torque it gives and loses torque when hot, reported in the new `motors` input, a per-turn stamina series and a stamina-left stat. Payload schema 2.".into() },
             ChangelogEntry { version: "0.1.0".into(), changes: "First version.".into() },
         ],
