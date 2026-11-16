@@ -23,7 +23,7 @@ Our own bots (house bots and baselines) are assets of the `bots` release, one zi
 
 ## Rebuilding a tag
 
-You need git and Docker with buildx; the guest also needs Rust (`rustup` installs the pinned toolchain itself).
+You need git and Docker with buildx. The guest also needs Rust (`rustup` installs the pinned toolchain itself) and RISC Zero's [rzup](https://dev.risczero.com/api/zkvm/install) with its Rust toolchain (`rzup install rust`): the guest compiles in RISC Zero's pinned Docker image, but its build looks for that toolchain, and any version past 1.81 gives the same guest.
 
 ```sh
 git clone https://github.com/botstadia/botstadia-public && cd botstadia-public

@@ -9,7 +9,10 @@
 #                                      exit-page <target>, arena <slug>
 #
 # Needs git and Docker (with buildx). The guest also needs Rust (rustup
-# installs the pinned toolchain from rust-toolchain.toml by itself).
+# installs the pinned toolchain from rust-toolchain.toml by itself) and RISC
+# Zero's rzup with its Rust toolchain (`rzup install rust`): risc0-build looks
+# for it, though the guest compiles in RISC Zero's pinned Docker image, and
+# any version past 1.81 builds the same guest.
 #
 # Tags, one per digest, written only by BotStadia's release task:
 #   image-<target>/sha256-<hex>    the enclave image (platform/), whose manifest
@@ -60,6 +63,8 @@ build() {
       [ -z "${OUT:-}" ] || cp "$work/image.tar" "$OUT"
       ;;
     guest)
+      command -v rzup >/dev/null || [ -x "$HOME/.risc0/bin/rzup" ] ||
+        die "the guest's build needs RISC Zero's rzup and its Rust toolchain: https://dev.risczero.com/api/zkvm/install, then rzup install rust"
       mkdir "$work/src"
       tree platform | tar -x -C "$work/src"
       digest=$(cd "$work/src" && BOTSTADIA_ATTESTATION_BUILD_GUEST=docker \

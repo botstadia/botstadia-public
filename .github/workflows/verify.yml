@@ -25,6 +25,11 @@ jobs:
         if: startsWith(inputs.tag, 'guest/')
         working-directory: platform
         run: rustup toolchain install
+      - name: RISC Zero's rzup and its Rust toolchain (the guest's build only)
+        if: startsWith(inputs.tag, 'guest/')
+        run: |
+          curl -fsSL https://risczero.com/install | bash
+          ~/.risc0/bin/rzup install rust
       - name: Rebuild and compare
         env:
           TAG: ${{ inputs.tag }}
