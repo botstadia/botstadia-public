@@ -89,6 +89,8 @@ build() {
       ;;
     arena)
       [ -n "$arg" ] || die "arena needs its slug"
+      git cat-file -e "$commit:arenas/Dockerfile" 2>/dev/null ||
+        die "this engine was released before engines were built in Docker, so it can't be rebuilt here: its tag's message says why (git tag -n9 <tag>)"
       builder
       tree arenas | docker buildx build --builder "$B" --platform linux/amd64 \
         --build-arg ARENA="$arg" \
