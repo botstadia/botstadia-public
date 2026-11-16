@@ -62,9 +62,9 @@ def git(source, *args, binary=False):
     return out if binary else out.decode()
 
 
-def parse_list(path):
+def parse_list(path, text):
     rules = {k: [] for k in ["include", "exclude", "root", "workspace", "drop-crate", "config", "submodule", "allow"]}
-    for n, line in enumerate(open(path), 1):
+    for n, line in enumerate(text.splitlines(), 1):
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
@@ -116,11 +116,11 @@ def workspace_manifest(text, members, crates, dropped_features):
     return drop_crates(text, crates, set())
 
 
-def config_subset(source, keys):
-    """Each key's entry exactly as config.yml has it (one line, or a folded
-    `>-` block), so what reads one reads the other. A `{{.KEY}}` in a value
-    must name another exported key."""
-    lines = open(os.path.join(source, "config.yml")).read().splitlines()
+def config_subset(source, commit, keys):
+    """Each key's entry exactly as the commit's config.yml has it (one line,
+    or a folded `>-` block), so what reads one reads the other. A `{{.KEY}}`
+    in a value must name another exported key."""
+    lines = git(source, "show", f"{commit}:config.yml").splitlines()
     blocks = {}
     for i, line in enumerate(lines):
         m = re.match(r"  ([A-Z0-9_]+):(.*)$", line)
@@ -186,8 +186,11 @@ def main():
     ap.add_argument("--dir", required=True)
     ap.add_argument("--commit", action="store_true")
     args = ap.parse_args()
-    rules = parse_list(args.list)
     commit = git(args.source, "rev-parse", "--verify", f"{args.ref}^{{commit}}").strip()
+    # The list, like everything else, as the commit has it.
+    rules = parse_list(args.list, git(args.source, "show", f"{commit}:{args.list}"))
+    if os.path.realpath(args.dest) == os.path.realpath(args.source):
+        sys.exit("--dest is the source repository")
     tracked = git(args.source, "ls-tree", "-r", "--full-tree", commit).splitlines()
 
     out_dir = os.path.normpath(os.path.join(args.dest, args.dir))
@@ -225,12 +228,27 @@ def main():
         os.makedirs(os.path.dirname(target), exist_ok=True)
         data = git(args.source, "cat-file", "blob", sha, binary=True)
         if path.endswith("Cargo.toml") and rules["drop-crate"]:
-            data = drop_crates(data.decode(), set(rules["drop-crate"]), dropped_features).encode()
+            # A dropped feature is this manifest's own: other crates may use
+            # the same name for something else.
+            own = set()
+            data = drop_crates(data.decode(), set(rules["drop-crate"]), own).encode()
+            dropped_features |= own
         with open(target, "wb") as f:
             f.write(data)
         os.chmod(target, 0o755 if mode == "100755" else 0o644)
         written.add(os.path.relpath(target, args.dest))
         copied += 1
+    # Root files this list owns: one dropped from it since the last export is
+    # removed, so nothing stale stays public.
+    if root_prefixes and args.dir not in (".", ""):
+        record = os.path.join(args.dest, f".exported-root-{os.path.basename(os.path.normpath(out_dir))}")
+        now = sorted(w for w in written if not w.startswith(args.dir.rstrip("/") + "/"))
+        if os.path.exists(record):
+            for old in open(record).read().split():
+                if old not in now and os.path.exists(os.path.join(args.dest, old)):
+                    os.remove(os.path.join(args.dest, old))
+        with open(record, "w") as f:
+            f.write("\n".join(now) + "\n")
     for path in rules["submodule"]:
         if path not in gitlinks:
             sys.exit(f"submodule {path} isn't a gitlink at {commit}")
@@ -254,7 +272,7 @@ def main():
             sys.exit(f"the exported Cargo.lock pins packages the source's doesn't: {moved}")
     if rules["config"]:
         with open(os.path.join(out_dir, "config.yml"), "w") as f:
-            f.write(config_subset(args.source, rules["config"]))
+            f.write(config_subset(args.source, commit, rules["config"]))
         written.add(os.path.relpath(os.path.join(out_dir, "config.yml"), args.dest))
 
     hits = scan(args.dest, written, rules)
@@ -264,9 +282,13 @@ def main():
 
     if not args.commit:
         return
+
+    def sub(path):
+        return os.path.normpath(os.path.join(args.dir, path))
+
     if gitlinks:
         modules = "".join(
-            f'[submodule "{args.dir}/{p}"]\n\tpath = {args.dir}/{p}\n\turl = {url}\n'
+            f'[submodule "{sub(p)}"]\n\tpath = {sub(p)}\n\turl = {url}\n'
             for p, url in submodule_urls(args.source, commit, gitlinks).items()
         )
         others = strip_modules(args.dest, args.dir)
@@ -275,7 +297,7 @@ def main():
     subprocess.run(["git", "-C", args.dest, "add", "-A"], check=True)
     for path, sha in gitlinks.items():
         subprocess.run(
-            ["git", "-C", args.dest, "update-index", "--add", "--cacheinfo", f"160000,{sha},{args.dir}/{path}"],
+            ["git", "-C", args.dest, "update-index", "--add", "--cacheinfo", f"160000,{sha},{sub(path)}"],
             check=True,
         )
     staged = subprocess.run(["git", "-C", args.dest, "diff", "--cached", "--quiet"]).returncode
