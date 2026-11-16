@@ -135,6 +135,50 @@ pub fn smt_active() -> bool {
         .unwrap_or(false)
 }
 
+/// A process's CPU time so far on macOS (the local runner), in
+/// nanoseconds, summed over its threads: what `proc_pid_rusage` reports, in
+/// Mach time units converted by the timebase. None for a process already
+/// gone, or anywhere else (Linux reads `/proc` in the runner itself).
+/// libc marks its Mach bindings deprecated in favour of another crate; for
+/// one call, they stay.
+#[cfg_attr(target_os = "macos", allow(deprecated))]
+pub fn process_cpu_ns(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+        // SAFETY: proc_pid_rusage writes one rusage_info_v2 for the flavour
+        // we name into the buffer we pass, which is that struct's size.
+        #[allow(unsafe_code)]
+        let r = unsafe {
+            libc::proc_pid_rusage(
+                i32::try_from(pid).ok()?,
+                libc::RUSAGE_INFO_V2,
+                info.as_mut_ptr().cast(),
+            )
+        };
+        if r != 0 {
+            return None;
+        }
+        // SAFETY: zeroed, then filled by the call that just succeeded.
+        #[allow(unsafe_code)]
+        let info = unsafe { info.assume_init() };
+        let mut base = libc::mach_timebase_info { numer: 0, denom: 0 };
+        // SAFETY: mach_timebase_info fills the struct we pass.
+        #[allow(unsafe_code)]
+        let r = unsafe { libc::mach_timebase_info(&mut base) };
+        if r != 0 || base.denom == 0 {
+            return None;
+        }
+        let ticks = u128::from(info.ri_user_time) + u128::from(info.ri_system_time);
+        u64::try_from(ticks * u128::from(base.numer) / u128::from(base.denom)).ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Run the calling thread only when nothing else wants its core
 /// (`SCHED_IDLE`): the flat-CPU idle loop, which must never slow a seat.
 pub fn idle_priority() -> anyhow::Result<()> {

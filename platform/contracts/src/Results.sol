@@ -20,9 +20,10 @@ import {Merkle} from "./Merkle.sol";
 contract Results {
     // ---------------------------------------------------------------- constants
 
-    // Four durations are functions rather than constants, so the testnet's
-    // variant (src/testnet/TestnetResults.sol) can shorten them; nothing else
-    // differs, and these are prod's values (OPERATIONS.md#targets).
+    // Four durations are functions rather than constants, so the devnet's
+    // variant (src/devnet/DevnetResults.sol) can shorten them; nothing else
+    // differs, and these are prod's values, which the public testnet runs
+    // too (OPERATIONS.md#targets).
 
     /// Every addition of a trust anchor, a new-key instruction and an admin
     /// transfer waits this long, in public.

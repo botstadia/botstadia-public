@@ -14,7 +14,7 @@
 //! - **Final close:** Friday 12:00. The final is posted at least an hour
 //!   before it, by 11:00.
 //!
-//! **The fast testnet's compressed week** (OPERATIONS.md#targets): with
+//! **The devnet's compressed week** (OPERATIONS.md#the-devnet): with
 //! `WEEK_DAY_SECONDS` set, the same calendar runs on a virtual clock whose
 //! day lasts that many real seconds, so a whole week, freeze to final, takes
 //! hours. Every time it gives is still a real unix time. What the contracts
@@ -22,11 +22,12 @@
 //! a post to its close.
 //!
 //! **A compressed clock can be moved** ([`WeekClock::phased_at`]): the
-//! testnet's admin action that opens a week at once shifts the virtual
+//! devnet's admin action that opens a week at once shifts the virtual
 //! clock so an open falls at that instant, and later weeks follow from it. A
 //! week's own times are always worked out on the clock phased at its own
 //! open, so moving the clock never moves a week that has opened. The
-//! calendar clock can't be moved: prod's weeks open when the calendar says.
+//! calendar clock can't be moved: prod's and the testnet's weeks open when
+//! the calendar says.
 
 use jiff::civil::{Date, Time, Weekday};
 use jiff::tz::TimeZone;
@@ -137,11 +138,12 @@ impl WeekClock {
     }
 
     /// From a Worker's vars (config.yml); `None` if any is missing. A
-    /// compressed day (`WEEK_DAY_SECONDS`) is refused on a prod target
-    /// (`prod`), as fast durations are: prod's weeks run on the calendar.
+    /// compressed day (`WEEK_DAY_SECONDS`) is refused on a target whose weeks
+    /// run on the calendar (`calendar`: the testnet and prod), as the
+    /// devnet's durations are.
     pub fn from_vars(
         var: impl Fn(&str) -> Option<String>,
-        prod: bool,
+        calendar: bool,
     ) -> anyhow::Result<Option<Self>> {
         let Some(values) = VARS.iter().map(|v| var(v)).collect::<Option<Vec<String>>>() else {
             return Ok(None);
@@ -151,9 +153,9 @@ impl WeekClock {
         )?;
         Ok(Some(
             match var(VAR_DAY_SECONDS).filter(|v| !v.trim().is_empty()) {
-                Some(_) if prod => {
-                    anyhow::bail!("{VAR_DAY_SECONDS} compresses the week, which prod never does")
-                }
+                Some(_) if calendar => anyhow::bail!(
+                    "{VAR_DAY_SECONDS} compresses the week, which the testnet and prod never do"
+                ),
                 Some(day) => clock.compressed(day.trim().parse()?)?,
                 None => clock,
             },
@@ -474,7 +476,7 @@ mod tests {
         );
     }
 
-    /// The fast testnet's week: the same calendar, a day of two hours.
+    /// The devnet's week: the same calendar, a day of two hours.
     #[test]
     fn a_compressed_week_runs_the_same_calendar_in_hours() {
         let day = 7_200;
@@ -536,7 +538,7 @@ mod tests {
         assert_eq!(fast.next_open(now) - fast.open_of(now), 7 * 7_200);
     }
 
-    /// The faster testnet's week, and the admin action that opens one at
+    /// The devnet's week, and the admin action that opens one at
     /// once: the clock moved to any instant opens a week exactly then.
     #[test]
     fn a_compressed_clock_moved_to_an_instant_opens_a_week_exactly_then() {

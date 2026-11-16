@@ -132,7 +132,10 @@ mod tests {
         };
         match Settings::for_image(&env) {
             Ok(s) => {
-                assert_eq!(crate::constants::FAST_TESTNET, s.chain_id == 84532);
+                assert_eq!(
+                    crate::constants::TARGET != crate::constants::Target::Prod,
+                    s.chain_id == 84532
+                );
                 // The keyless one until the api hands over the keys.
                 assert_eq!(s.rpc_urls, ["https://sepolia.base.org"]);
                 assert!(s.keyed_chain.is_some());

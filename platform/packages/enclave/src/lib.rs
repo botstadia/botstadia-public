@@ -11,8 +11,8 @@
 #[cfg(all(feature = "mock", botstadia_image))]
 compile_error!("mock attestation can never be built into an enclave image");
 
-#[cfg(all(feature = "mock", botstadia_testnet))]
-compile_error!("the fast testnet's build is an enclave image: no mock attestation");
+#[cfg(all(feature = "mock", any(botstadia_testnet, botstadia_devnet)))]
+compile_error!("the testnet's and the devnet's builds are enclave images: no mock attestation");
 
 pub mod anchor;
 pub mod attest;

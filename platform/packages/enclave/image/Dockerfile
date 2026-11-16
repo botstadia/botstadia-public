@@ -45,8 +45,10 @@ RUN mkdir -p /opt/onnxruntime && \
 
 # The runner, compiled with no network.
 FROM vendor AS build
-# testnet: the fast testnet's image (`--cfg botstadia_testnet`, shortened
-# waits, serves Base Sepolia); prod: prod's.
+# prod: prod's. testnet: prod's constants exactly, serving Base Sepolia
+# (`--cfg botstadia_testnet`, the public testnet). devnet: shortened waits
+# and Base's `safe` head, serving Base Sepolia (`--cfg botstadia_devnet`).
+# src/constants.rs tests these three lines.
 ARG TARGET
 ARG SOURCE_DATE_EPOCH
 # No LTO and one codegen unit: ThinLTO's promoted symbols carry hashes
@@ -60,11 +62,12 @@ ENV ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
     SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 RUN --network=none \
-    : "${TARGET:?pass --build-arg TARGET=testnet or prod}" && \
+    : "${TARGET:?pass --build-arg TARGET=prod, testnet or devnet}" && \
     case "$TARGET" in \
-      testnet) cfg="--cfg botstadia_image --cfg botstadia_testnet" ;; \
       prod) cfg="--cfg botstadia_image" ;; \
-      *) echo "TARGET is testnet or prod" >&2; exit 1 ;; \
+      testnet) cfg="--cfg botstadia_image --cfg botstadia_testnet" ;; \
+      devnet) cfg="--cfg botstadia_image --cfg botstadia_devnet" ;; \
+      *) echo "TARGET is prod, testnet or devnet" >&2; exit 1 ;; \
     esac && \
     RUSTFLAGS="$cfg -C link-arg=-Wl,--build-id=none --remap-path-prefix=/src=. --remap-path-prefix=/usr/local/cargo=cargo" \
       cargo build --release --locked --offline -p botstadia-enclave --bin botstadia-runner && \

@@ -16,7 +16,13 @@
 #
 # Tags, one per digest, written only by BotStadia's release task:
 #   image-<target>/sha256-<hex>    the enclave image (platform/), whose manifest
-#                                  digest the results contract approves
+#                                  digest the results contract approves:
+#                                  prod, testnet (prod's constants serving
+#                                  Base Sepolia) or devnet (shortened waits).
+#                                  A tag is rebuilt with its own commit's
+#                                  Dockerfile, so image-testnet tags up to
+#                                  sha256-6a57fd8d… rebuild the fast build
+#                                  the testnet then ran
 #   guest/0x<hex>                  the zk guest's image id, which an approved
 #                                  verifier is paired with
 #   arena/<slug>-<version>/sha256-<hex>   an arena's engine (arenas/), the
@@ -49,7 +55,7 @@ build() {
   tree() { git archive --format=tar "$commit:$1"; }
   case "$kind" in
     image)
-      [ -n "$arg" ] || die "image needs a target (testnet or prod)"
+      [ -n "$arg" ] || die "image needs a target (testnet, devnet or prod)"
       builder
       # The last change to platform/, so a commit elsewhere (a list, the
       # arenas) never moves the image's digest.

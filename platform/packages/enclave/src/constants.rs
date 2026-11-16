@@ -1,47 +1,106 @@
 //! Constants of the image (OPERATIONS.md#configuration): fixed in the build,
 //! so in its digest, never set at launch.
 //!
-//! The fast testnet's image is built with `--cfg botstadia_testnet`, which
-//! shortens the waits that would hold a check for hours, and waits on Base's
-//! `safe` head where prod's waits on `finalized`
-//! (`botstadia_chain::rpc::BlockTag::SETTLED`; OPERATIONS.md#targets). It's
-//! a different digest from prod's, and prod's image is never built with it;
-//! the rehearsal runs prod's.
+//! One image per target (OPERATIONS.md#targets), chosen at build time:
+//!
+//! - **prod** (no target cfg): prod's waits, serving Base mainnet once its
+//!   contracts exist.
+//! - **testnet** (`--cfg botstadia_testnet`): prod's waits exactly, serving
+//!   Base Sepolia. The cfg chooses only the chain ([`chains`]), so the public
+//!   testnet runs what prod runs.
+//! - **devnet** (`--cfg botstadia_devnet`): shortened waits, so a check never
+//!   holds for hours, and Base's `safe` head where the others wait on
+//!   `finalized` (`botstadia_chain::rpc::BlockTag::SETTLED`), serving Base
+//!   Sepolia. Never a release.
 
-/// A new arena version is used by warm-ups and bettable sessions only this
-/// long after the post announcing it (TRUST.md#approving-builds).
-#[cfg(not(botstadia_testnet))]
-pub const ARENA_WAIT_S: u64 = 24 * 60 * 60;
-#[cfg(botstadia_testnet)]
-pub const ARENA_WAIT_S: u64 = 10 * 60;
+/// Which target's image this is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Prod,
+    Testnet,
+    Devnet,
+}
 
-/// The contract's floor from a post to its sessions' close
-/// (`CLOSE_MIN_AFTER_POST`): a first bet proves against a post at least
-/// this long before close.
-#[cfg(not(botstadia_testnet))]
-pub const CLOSE_MIN_AFTER_POST_S: u64 = 60 * 60;
-#[cfg(botstadia_testnet)]
-pub const CLOSE_MIN_AFTER_POST_S: u64 = 2 * 60;
+#[cfg(all(botstadia_testnet, botstadia_devnet))]
+compile_error!("an image is built for one target: botstadia_testnet or botstadia_devnet");
 
-/// The contract's minimum anchor age before a result (`RESULT_MIN_AGE`).
-#[cfg(not(botstadia_testnet))]
-pub const RESULT_MIN_AGE_S: u64 = 15 * 60;
-#[cfg(botstadia_testnet)]
-pub const RESULT_MIN_AGE_S: u64 = 2 * 60;
+/// This image's target.
+pub const TARGET: Target = if cfg!(botstadia_devnet) {
+    Target::Devnet
+} else if cfg!(botstadia_testnet) {
+    Target::Testnet
+} else {
+    Target::Prod
+};
 
-/// A session's result deadline after its close (`RESULT_DEADLINE`).
-#[cfg(not(botstadia_testnet))]
-pub const RESULT_DEADLINE_S: u64 = 24 * 60 * 60;
-#[cfg(botstadia_testnet)]
-pub const RESULT_DEADLINE_S: u64 = 2 * 60 * 60;
+/// The waits an image keeps, each matching a contract constant or the
+/// keeper's (`botstadia_backend::durations`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Waits {
+    /// A new arena version is used by warm-ups and bettable sessions only
+    /// this long after the post announcing it (TRUST.md#approving-builds).
+    pub arena_wait_s: u64,
+    /// The contract's floor from a post to its sessions' close
+    /// (`CLOSE_MIN_AFTER_POST`): a first bet proves against a post at least
+    /// this long before close.
+    pub close_min_after_post_s: u64,
+    /// The contract's minimum anchor age before a result (`RESULT_MIN_AGE`).
+    pub result_min_age_s: u64,
+    /// A session's result deadline after its close (`RESULT_DEADLINE`).
+    pub result_deadline_s: u64,
+    /// The batch window (ms): heartbeats and claims only at its boundaries.
+    /// A round waits on it up to three times (the claim, the anchor, the
+    /// result), so the devnet's is a minute.
+    pub window_ms: u64,
+}
+
+/// Prod's waits: `Results`' constants. The testnet's image keeps them.
+pub const PROD_WAITS: Waits = Waits {
+    arena_wait_s: 24 * 60 * 60,
+    close_min_after_post_s: 60 * 60,
+    result_min_age_s: 15 * 60,
+    result_deadline_s: 24 * 60 * 60,
+    window_ms: 180_000,
+};
+
+/// The devnet's: `DevnetResults`' constants.
+pub const DEVNET_WAITS: Waits = Waits {
+    arena_wait_s: 10 * 60,
+    close_min_after_post_s: 2 * 60,
+    result_min_age_s: 2 * 60,
+    result_deadline_s: 2 * 60 * 60,
+    window_ms: 60_000,
+};
+
+/// A target's waits: prod's everywhere but the devnet.
+pub const fn waits(target: Target) -> Waits {
+    match target {
+        Target::Devnet => DEVNET_WAITS,
+        Target::Prod | Target::Testnet => PROD_WAITS,
+    }
+}
+
+const WAITS: Waits = waits(TARGET);
+
+/// This image's arena wait (see [`Waits`]).
+pub const ARENA_WAIT_S: u64 = WAITS.arena_wait_s;
+/// This image's close floor (see [`Waits`]).
+pub const CLOSE_MIN_AFTER_POST_S: u64 = WAITS.close_min_after_post_s;
+/// This image's minimum result age (see [`Waits`]).
+pub const RESULT_MIN_AGE_S: u64 = WAITS.result_min_age_s;
+/// This image's result deadline (see [`Waits`]).
+pub const RESULT_DEADLINE_S: u64 = WAITS.result_deadline_s;
+/// This image's batch window (see [`Waits`]).
+pub const WINDOW_MS: u64 = WAITS.window_ms;
 
 /// A first bet proves against a post at most this long before close, so a
 /// bettable session looks back no further (TRUST.md#how-the-enclave-talks-
 /// to-the-chain).
 pub const POST_LOOKBACK_S: u64 = 7 * 24 * 60 * 60;
 
-/// Whether this is the fast testnet's build.
-pub const FAST_TESTNET: bool = cfg!(botstadia_testnet);
+/// Whether this is the devnet's build: its shortened waits and the `safe`
+/// head.
+pub const DEVNET: bool = matches!(TARGET, Target::Devnet);
 
 /// Our GCP project id, as attestation tokens name it (SETUP: one project
 /// for testnet and prod; the chain binding keeps them apart).
@@ -50,14 +109,6 @@ pub const PROJECT: &str = "botstadia";
 /// The CDN host arenas and seed bots come from, each file checked against
 /// its named digest (TRUST.md#arenas).
 pub const CDN: &str = "https://cdn.botstadia.mediabucket.io";
-
-/// The batch window (ms): heartbeats and claims only at its boundaries. A
-/// round waits on it up to three times (the claim, the anchor, the result),
-/// so the fast testnet's is a minute.
-#[cfg(not(botstadia_testnet))]
-pub const WINDOW_MS: u64 = 180_000;
-#[cfg(botstadia_testnet)]
-pub const WINDOW_MS: u64 = 60_000;
 
 /// One allowlisted RPC provider: its URL with `{key}` where the launch's
 /// key for it goes, or none for a keyless public endpoint. The host is fixed
@@ -83,7 +134,8 @@ pub struct ChainConstants {
 pub const GUEST_IMAGE_ID: &str =
     "0x61b336815488909ed1e6fd48ad779f12ea443c9d86c4446bce0332e968294228";
 
-/// Base Sepolia: the fast testnet.
+/// Base Sepolia: the testnet and the devnet, each its own chain binding
+/// (results contract) on the one chain, sharing one Groth16 verifier.
 pub const BASE_SEPOLIA: ChainConstants = ChainConstants {
     chain_id: 84532,
     // In the order the runner pairs them: two that agree are enough, and
@@ -110,14 +162,19 @@ pub const BASE_SEPOLIA: ChainConstants = ChainConstants {
     guest_image_id: GUEST_IMAGE_ID,
 };
 
-/// The chains this image serves: the testnet's build serves only the
-/// testnet, and prod's serves none until its contracts are deployed (its
+/// The chains a target's image serves: Base Sepolia for the testnet and
+/// the devnet, and none for prod until its contracts are deployed (its
 /// verifier goes here then, and a new image is approved through the
 /// timelock).
-#[cfg(botstadia_testnet)]
-pub const CHAINS: &[ChainConstants] = &[BASE_SEPOLIA];
-#[cfg(not(botstadia_testnet))]
-pub const CHAINS: &[ChainConstants] = &[];
+pub const fn chains(target: Target) -> &'static [ChainConstants] {
+    match target {
+        Target::Testnet | Target::Devnet => &[BASE_SEPOLIA],
+        Target::Prod => &[],
+    }
+}
+
+/// The chains this image serves.
+pub const CHAINS: &[ChainConstants] = chains(TARGET);
 
 /// This image's constants for `chain_id`, or why it won't serve it.
 pub fn chain(chain_id: u64) -> anyhow::Result<&'static ChainConstants> {
@@ -230,9 +287,41 @@ mod constant_tests {
         assert_eq!(value("URL_CDN"), CDN);
     }
 
+    /// The public testnet runs what prod runs: its image differs from
+    /// prod's only in the chain it serves (OPERATIONS.md#the-testnet).
+    #[test]
+    fn the_testnets_image_keeps_prods_constants() {
+        assert_eq!(waits(Target::Testnet), waits(Target::Prod));
+        assert_eq!(waits(Target::Prod), PROD_WAITS);
+        assert_ne!(waits(Target::Devnet), PROD_WAITS);
+        assert_eq!(chains(Target::Testnet), &[BASE_SEPOLIA]);
+        assert_eq!(chains(Target::Devnet), &[BASE_SEPOLIA]);
+        assert!(chains(Target::Prod).is_empty());
+        // The image's Dockerfile builds each target with its own cfg alone:
+        // the testnet's never carries the devnet's.
+        let dockerfile = include_str!("../image/Dockerfile");
+        let cfg = |target: &str| {
+            dockerfile
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(&format!("{target}) cfg=\"")))
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("no {target} case in the Dockerfile"))
+                .to_string()
+        };
+        assert_eq!(cfg("prod"), "--cfg botstadia_image");
+        assert_eq!(
+            cfg("testnet"),
+            "--cfg botstadia_image --cfg botstadia_testnet"
+        );
+        assert_eq!(
+            cfg("devnet"),
+            "--cfg botstadia_image --cfg botstadia_devnet"
+        );
+    }
+
     #[test]
     fn an_image_serves_only_its_own_chains() {
-        assert_eq!(chain(84532).is_ok(), FAST_TESTNET);
+        assert_eq!(chain(84532).is_ok(), TARGET != Target::Prod);
         assert!(chain(8453).is_err());
         assert!(chain(31337).is_err());
     }
@@ -244,14 +333,35 @@ mod tests {
     #[test]
     fn the_keeper_and_the_image_agree_on_the_arena_wait() {
         use botstadia_backend::durations::Durations;
-        let keeper = if super::FAST_TESTNET {
-            Durations::FAST
+        let keeper = if super::DEVNET {
+            Durations::DEVNET
         } else {
             Durations::PROD
         };
         assert_eq!(keeper.arena_wait_s, super::ARENA_WAIT_S);
         assert_eq!(keeper.close_min_after_post_s, super::CLOSE_MIN_AFTER_POST_S);
         assert_eq!(keeper.result_deadline_s, super::RESULT_DEADLINE_S);
+        assert_eq!(Durations::PROD.arena_wait_s, super::PROD_WAITS.arena_wait_s);
+        assert_eq!(
+            Durations::PROD.close_min_after_post_s,
+            super::PROD_WAITS.close_min_after_post_s
+        );
+        assert_eq!(
+            Durations::PROD.result_deadline_s,
+            super::PROD_WAITS.result_deadline_s
+        );
+        assert_eq!(
+            Durations::DEVNET.arena_wait_s,
+            super::DEVNET_WAITS.arena_wait_s
+        );
+        assert_eq!(
+            Durations::DEVNET.close_min_after_post_s,
+            super::DEVNET_WAITS.close_min_after_post_s
+        );
+        assert_eq!(
+            Durations::DEVNET.result_deadline_s,
+            super::DEVNET_WAITS.result_deadline_s
+        );
     }
 
     /// The keeper schedules new sessions under the host's newest budget

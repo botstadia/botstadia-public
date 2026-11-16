@@ -105,7 +105,8 @@ struct Turn {
 
 /// A process's CPU time so far, in nanoseconds, summed over its threads: the
 /// time it has actually run, which our own work on its core never adds to.
-/// None where the kernel doesn't say (macOS, or a process already gone).
+/// On macOS (the local runner) the kernel's rusage, through the sandbox
+/// crate. None for a process already gone.
 pub fn cpu_ns(pid: u32) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -118,10 +119,7 @@ pub fn cpu_ns(pid: u32) -> Option<u64> {
         Some(total)
     }
     #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        None
-    }
+    botstadia_sandbox::process_cpu_ns(pid)
 }
 
 /// A seat's time in its turn (BOTS.md#one-seat-at-a-time-per-core: each seat
@@ -962,7 +960,7 @@ mod tests {
         assert_eq!(seat_time(second, None), second);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_process_cpu_time_counts_its_work_not_its_sleep() {
         // Processes of their own, as seats are: the test binary's other
@@ -975,9 +973,9 @@ mod tests {
                 .spawn()
                 .unwrap();
             std::thread::sleep(Duration::from_millis(20));
-            let a = cpu_ns(child.id()).expect("schedstat");
+            let a = cpu_ns(child.id()).expect("cpu time");
             std::thread::sleep(Duration::from_millis(200));
-            let b = cpu_ns(child.id()).expect("schedstat");
+            let b = cpu_ns(child.id()).expect("cpu time");
             child.kill().unwrap();
             child.wait().unwrap();
             b.saturating_sub(a)
@@ -1000,7 +998,7 @@ mod tests {
     /// every turn, the backstop multiple on the arena's step), past the
     /// result deadline, so no session could be anchored. The published
     /// arenas' limits, in minutes at the calibrated rate, now fit well
-    /// inside even the fast testnet's two hours with two finality lags.
+    /// inside even the devnet's two hours with two finality lags.
     #[test]
     fn the_published_arenas_longest_sessions_fit_inside_the_deadline() {
         let minutes = |seats, turns, turn_fuel, init_fuel| {

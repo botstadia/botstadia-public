@@ -14,5 +14,10 @@ nix = { version = "0.30", default-features = false, features = ["sched", "resour
 seccompiler = "0.5"
 libc = "0.2"
 
+# The local runner's CPU-time read (`process_cpu_ns`), so a seat on a busy
+# Mac is timed by what it ran, as on Linux.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true

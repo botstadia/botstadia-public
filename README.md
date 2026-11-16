@@ -13,7 +13,7 @@ Each build that matters is tagged by its digest, by BotStadia's release task and
 
 | Tag | What | Checked against |
 |---|---|---|
-| `image-<target>/sha256-<hex>` | The enclave image's manifest digest (`testnet` or `prod`) | The results contract's `imageApproved(bytes32)`, after a 2-day public timelock |
+| `image-<target>/sha256-<hex>` | The enclave image's manifest digest: `prod`; `testnet`, prod's constants serving Base Sepolia for the public testnet at testnet.botstadia.com; or `devnet`, our private one with shortened waits. `image-testnet` tags up to `sha256-6a57fd8d…` are the earlier fast build, and rebuild as such from their own commit | The results contract's `imageApproved(bytes32)`, after a 2-day public timelock (the devnet's is shortened) |
 | `guest/0x<hex>` | The zk guest's image id | The guest image id an approved verifier is paired with (`verifiers(bytes32)`) |
 | `arena/<arena>-<version>/sha256-<hex>` | An arena engine's digest | Every session's spec, posted on-chain before betting opens |
 | `shell/sha256-<hex>` | The policy shell's digest | A trained bot's upload report, and the CDN's `policy-shell/` |
