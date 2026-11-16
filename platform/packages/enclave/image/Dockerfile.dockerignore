@@ -1,0 +1,17 @@
+# The enclave image's build context: tracked sources only, never a build,
+# a secret or the local state.
+target
+**/target
+node_modules
+dist
+.trunk-dist
+.env
+.env.*
+!.env.example
+.chain
+.wrangler
+**/.wrangler
+contracts/out
+contracts/cache
+contracts/lib
+.git

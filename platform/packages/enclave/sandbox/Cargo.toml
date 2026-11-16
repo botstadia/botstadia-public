@@ -1,0 +1,18 @@
+[package]
+name = "botstadia-sandbox"
+description = "The session runner's Linux-only seat isolation: namespaces, a seccomp filter and core affinity. Elsewhere every call reports it's unsupported, so nothing pretends to isolate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30", default-features = false, features = ["sched", "resource"] }
+seccompiler = "0.5"
+libc = "0.2"
+
+[lints]
+workspace = true

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BotStadia wallet exit</title>
+<!--
+  The BotStadia exit page (TRUST.md "A way out without us"). Open this file
+  on your own device, from where you saved it. It is not a website and needs
+  nothing of ours: it talks to a public bundler and a public RPC, which you
+  can replace below. Your recovery key signs here and is never sent.
+-->
+<style>
+  :root { color-scheme: dark; --bg: #05070d; --fg: #e9f1ff; --dim: #afc2de; --rule: rgba(112,185,255,.3); --warn: #ffc16d; --ok: #7dffa6; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.4rem; margin: 0 0 6px; }
+  h2 { font-size: 1.05rem; margin: 28px 0 8px; }
+  p { color: var(--dim); margin: 6px 0; }
+  label { display: block; margin: 12px 0 4px; font-size: .85rem; color: var(--dim); }
+  textarea, input { width: 100%; background: #0b1020; color: var(--fg); border: 1px solid var(--rule); border-radius: 8px; padding: 9px 10px; font: 13px/1.4 ui-monospace, Menlo, monospace; }
+  textarea { min-height: 110px; }
+  button { margin-top: 12px; background: #67a8ff; color: #05070d; border: 0; border-radius: 999px; padding: 9px 18px; font-weight: 600; cursor: pointer; }
+  button[disabled] { opacity: .45; cursor: default; }
+  .box { border: 1px solid var(--rule); border-radius: 12px; padding: 14px; margin-top: 14px; }
+  .warn { color: var(--warn); }
+  .ok { color: var(--ok); }
+  .mono { font-family: ui-monospace, Menlo, monospace; word-break: break-all; }
+  details { margin-top: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Move your BotStadia wallet</h1>
+  <p>This page claims your winnings and refunds and withdraws your USDC, using your recovery key, with no help from BotStadia. It works even if botstadia.com is gone.</p>
+  <p class="warn">Only use this file from where you saved it. Never type your recovery key into a website.</p>
+
+  <label for="save">Your saved wallet details</label>
+  <textarea id="save" spellcheck="false"></textarea>
+  <label for="key">Recovery key (if it isn't in the details above)</label>
+  <input id="key" spellcheck="false" autocomplete="off" placeholder="bsrk1-…">
+  <details>
+    <summary>Network settings</summary>
+    <label for="rpc">RPC (blank: this page's public default)</label>
+    <input id="rpc" spellcheck="false" placeholder="">
+    <label for="bundler">Bundler (blank: this page's public default)</label>
+    <input id="bundler" spellcheck="false" placeholder="">
+  </details>
+  <button id="check">Check my wallet</button>
+
+  <div id="status" class="box" hidden></div>
+
+  <div id="deploy-box" class="box" hidden>
+    <h2>Your wallet isn't deployed yet</h2>
+    <p>Its first step can't be paid in USDC. Send a little ETH on Base to your recovery key's address, then deploy it from here. After that, claims and withdrawals pay their gas in USDC.</p>
+    <p>Send at least <strong id="eth-needed"></strong> ETH to <span class="mono" id="key-address"></span>, on Base.</p>
+    <button id="deploy">Deploy my wallet</button>
+  </div>
+
+  <div id="withdraw-box" class="box" hidden>
+    <h2>Claim and withdraw</h2>
+    <p>One step claims everything claimable and sends USDC to an address you choose, on Base. Gas is paid in USDC from the wallet.</p>
+    <label for="to">Send to (a Base address you control)</label>
+    <input id="to" spellcheck="false" placeholder="0x…">
+    <label for="amount">Amount in USDC (blank: everything but what the gas could take, which stays in the wallet)</label>
+    <input id="amount" inputmode="decimal" placeholder="">
+    <button id="withdraw">Claim and withdraw</button>
+  </div>
+  <p style="margin-top:28px">Week-winner pools need their final's entry to claim, which this page doesn't fetch: claim those on the site, or with <span class="mono">claimWeeksFor</span> on the settlement contract.</p>
+</main>
+<script type="application/json" id="saved">"__BOTSTADIA_SAVE__"</script>
+<script type="module">
+/*__GLUE__*/
+
+const WASM = "__WASM_BASE64__";
+const bytes = Uint8Array.from(atob(WASM), c => c.charCodeAt(0));
+initSync({ module: bytes });
+
+const $ = id => document.getElementById(id);
+const saved = JSON.parse($("saved").textContent);
+if (saved && saved !== "__BOTSTADIA_SAVE__") $("save").value = saved;
+
+const usdc = v => (Number(BigInt(v)) / 1e6).toFixed(6);
+const eth = v => (Number(BigInt(v)) / 1e18).toFixed(6);
+const say = (html, cls) => { const s = $("status"); s.hidden = false; s.className = "box " + (cls || ""); s.innerHTML = html; };
+const text = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+async function check() {
+  $("deploy-box").hidden = true; $("withdraw-box").hidden = true;
+  say("Checking…");
+  try {
+    read_save($("save").value, $("key").value);
+    const w = JSON.parse(await inspect($("save").value, $("key").value, $("rpc").value.trim()));
+    let html = `Wallet <span class="mono">${text(w.wallet)}</span> on chain ${w.chain_id}<br>USDC: <strong>${usdc(w.usdc)}</strong>`;
+    if (w.claimable_total) html += `<br>Ready to claim: <strong>${usdc(w.claimable_total)}</strong>`;
+    if (w.key_is_owner === false) html += `<br><span class="warn">That recovery key is no longer an owner of this wallet.</span>`;
+    say(html, w.key_is_owner === false ? "warn" : "");
+    if (!w.deployed) {
+      $("deploy-box").hidden = false;
+      $("eth-needed").textContent = w.deploy_eth_needed ? eth(w.deploy_eth_needed) : "?";
+      $("key-address").textContent = w.key_address || "(enter your recovery key)";
+      $("deploy").disabled = !w.key_address || BigInt(w.key_eth || 0) < BigInt(w.deploy_eth_needed || 1);
+      if (w.key_eth) say(html + `<br>ETH at your recovery key: ${eth(w.key_eth)}`);
+    } else if (w.key_is_owner) {
+      $("withdraw-box").hidden = false;
+    }
+  } catch (e) { say(text(e), "warn"); }
+}
+
+$("check").onclick = check;
+$("deploy").onclick = async () => {
+  say("Deploying from your recovery key…");
+  try { const r = JSON.parse(await deploy($("save").value, $("key").value, $("rpc").value.trim())); say(`Deployed in <span class="mono">${text(r.tx)}</span>.`, "ok"); await check(); }
+  catch (e) { say(text(e), "warn"); }
+};
+$("withdraw").onclick = async () => {
+  say("Claiming and withdrawing…");
+  try {
+    const r = JSON.parse(await withdraw($("save").value, $("key").value, $("to").value, $("amount").value, $("rpc").value.trim(), $("bundler").value.trim()));
+    say(`Done: claimed ${usdc(r.claimed)} and sent ${usdc(r.sent)} USDC in <span class="mono">${text(r.tx)}</span>.`, "ok");
+  } catch (e) { say(text(e), "warn"); }
+};
+</script>
+</body>
+</html>

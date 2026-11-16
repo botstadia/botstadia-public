@@ -1,0 +1,14 @@
+[package]
+name = "botstadia-rating"
+description = "BotStadia's one rating implementation: OpenSkill's Plackett-Luce model for 1v1 and multi-entrant finishing orders, with pure-Rust maths and a fixed precision, so anyone recomputes ratings exactly."
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+libm = "=0.2.16"
+serde = { workspace = true }
+
+[lints]
+workspace = true

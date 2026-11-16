@@ -1,0 +1,18 @@
+[package]
+name = "botstadia-seating"
+description = "BotStadia's seating version: who sits in which seat, drawn from a session's seed, so the enclave, the api and anyone checking us name the same seats."
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sha2 = { workspace = true }
+sha3 = { version = "0.10.8", default-features = false }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+hex = "0.4.3"
+
+[lints]
+workspace = true

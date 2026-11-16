@@ -1,0 +1,35 @@
+[package]
+name = "botstadia-upload"
+description = "The public upload path (TRUST.md#bundle-encryption): the author key and its recovery phrase, bundle encryption to the BundleKey and the author key, rekeying, signing, and the checks on the BundleKey's boot proof. Linked by the CLI and the enclave; exported to the standalone upload tool's public repository."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# The boot-proof check reads the chain through two public RPC providers.
+chain = ["botstadia-chain/native"]
+
+[dependencies]
+botstadia-chain = { workspace = true }
+alloy-sol-types = { workspace = true }
+botstadia-attestation-core = { path = "../attestation/core" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = "0.4.3"
+base64 = { workspace = true }
+hpke = { version = "0.14.1", default-features = false, features = ["alloc", "x25519", "chacha", "getrandom"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "getrandom"] }
+hkdf = "0.13.0"
+sha2-011 = { package = "sha2", version = "0.11" }
+bip39 = { version = "2", default-features = false, features = ["std"] }
+getrandom = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+botstadia-attestation-core = { path = "../attestation/core", features = ["mock"] }
+
+[lints]
+workspace = true

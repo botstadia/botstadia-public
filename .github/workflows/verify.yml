@@ -1,0 +1,31 @@
+# Rebuild what a tag names from this repository alone and fail unless its
+# digest matches (TRUST.md#approving-builds). Run by hand, by us or by anyone
+# in a fork: Actions, Run workflow, give the tag.
+name: Verify a tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to rebuild, e.g. image-testnet/sha256-…, guest/0x…, arena/boxing-0.3.1/sha256-…"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Rust toolchain (the guest's build only)
+        if: startsWith(inputs.tag, 'guest/')
+        working-directory: platform
+        run: rustup toolchain install
+      - name: Rebuild and compare
+        env:
+          TAG: ${{ inputs.tag }}
+        run: ./verify.sh "$TAG"

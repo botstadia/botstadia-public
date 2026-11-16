@@ -1,0 +1,24 @@
+[package]
+name = "botstadia-exit-page"
+description = "The exit page (TRUST.md#a-way-out-without-us): one self-contained file that claims and withdraws from an account wallet with its recovery key, with no account of ours, and deploys an undeployed one from its setup data."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+botstadia-chain = { workspace = true }
+alloy-sol-types = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = ["Window", "Request", "RequestInit", "Response", "Headers"] }
+
+[lints]
+workspace = true

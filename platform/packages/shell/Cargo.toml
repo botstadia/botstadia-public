@@ -1,0 +1,16 @@
+[package]
+name = "botstadia-policy-shell"
+description = "The policy shell: the one generic program that runs a trained policy's ONNX model in any BotStadia arena, by the shell's ONNX contract. Built reproducibly; its digest is published."
+version = "1.0.1"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+botstadia-interface = { workspace = true, features = ["agent-guest"] }
+
+[lints]
+workspace = true

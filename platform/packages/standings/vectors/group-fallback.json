@@ -1,0 +1,134 @@
+{
+  "about": "Four bots, three of one group: one session a round, and the two left over, who can't meet, sit out unpaired with no point.",
+  "field": [
+    {
+      "digest": "0100000000000000000000000000000000000000000000000000000000000001",
+      "group": "0200000000000000000000000000000000000000000000000000000000000000",
+      "mu": 30000000,
+      "sigma": 2000000
+    },
+    {
+      "digest": "0100000000000000000000000000000000000000000000000000000000000002",
+      "group": "0200000000000000000000000000000000000000000000000000000000000000",
+      "mu": 29300000,
+      "sigma": 2250000
+    },
+    {
+      "digest": "0100000000000000000000000000000000000000000000000000000000000003",
+      "group": "0200000000000000000000000000000000000000000000000000000000000000",
+      "mu": 28600000,
+      "sigma": 2500000
+    },
+    {
+      "digest": "0100000000000000000000000000000000000000000000000000000000000004",
+      "group": "0200000000000000000000000000000000000000000000000000000000000001",
+      "mu": 27900000,
+      "sigma": 2000000
+    }
+  ],
+  "final_size": 2,
+  "finalists": [
+    0,
+    3
+  ],
+  "max_entrants": 2,
+  "min_entrants": 2,
+  "name": "group-fallback",
+  "rounds": [
+    {
+      "byes": [],
+      "outcomes": [
+        {
+          "places": [
+            0,
+            1
+          ]
+        }
+      ],
+      "sessions": [
+        [
+          0,
+          3
+        ]
+      ],
+      "unpaired": [
+        1,
+        2
+      ]
+    },
+    {
+      "byes": [],
+      "outcomes": [
+        {
+          "places": [
+            0,
+            1
+          ]
+        }
+      ],
+      "sessions": [
+        [
+          0,
+          3
+        ]
+      ],
+      "unpaired": [
+        1,
+        2
+      ]
+    },
+    {
+      "byes": [],
+      "outcomes": [
+        {
+          "places": [
+            0,
+            1
+          ]
+        }
+      ],
+      "sessions": [
+        [
+          0,
+          3
+        ]
+      ],
+      "unpaired": [
+        1,
+        2
+      ]
+    }
+  ],
+  "standings": [
+    {
+      "bot": 0,
+      "byes": 0,
+      "points": 2520,
+      "sessions": 3,
+      "strength": 0
+    },
+    {
+      "bot": 1,
+      "byes": 0,
+      "points": 0,
+      "sessions": 0,
+      "strength": 0
+    },
+    {
+      "bot": 3,
+      "byes": 0,
+      "points": 0,
+      "sessions": 3,
+      "strength": 0
+    },
+    {
+      "bot": 2,
+      "byes": 0,
+      "points": 0,
+      "sessions": 0,
+      "strength": 0
+    }
+  ],
+  "standings_version": 1,
+  "unit": 840
+}

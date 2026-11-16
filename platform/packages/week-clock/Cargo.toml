@@ -1,0 +1,14 @@
+[package]
+name = "botstadia-week-clock"
+description = "The week's clock (COMPETITION.md#the-week): every time a week runs on, in Israel time and following its daylight saving, from config.yml. One crate, so the keeper that runs the weeks and the outside check that watches them work out the same times."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+jiff = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

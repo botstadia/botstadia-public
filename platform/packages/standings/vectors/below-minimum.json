@@ -1,0 +1,28 @@
+{
+  "about": "One bot in a 1v1 arena: no rounds and no finalists.",
+  "field": [
+    {
+      "digest": "0100000000000000000000000000000000000000000000000000000000000001",
+      "group": "0200000000000000000000000000000000000000000000000000000000000000",
+      "mu": 30000000,
+      "sigma": 2000000
+    }
+  ],
+  "final_size": 2,
+  "finalists": [],
+  "max_entrants": 2,
+  "min_entrants": 2,
+  "name": "below-minimum",
+  "rounds": [],
+  "standings": [
+    {
+      "bot": 0,
+      "byes": 0,
+      "points": 0,
+      "sessions": 0,
+      "strength": 0
+    }
+  ],
+  "standings_version": 1,
+  "unit": 840
+}

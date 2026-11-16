@@ -1,0 +1,37 @@
+[package]
+name = "botstadia-host-fixture-bot"
+description = "Bots for the session host's tests, one behaviour per feature."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+# Exactly one is enabled per build.
+steady = []
+spiky = []
+forever = []
+trap = []
+init_trap = []
+memcopy = []
+sleep = []
+clock = []
+budget = []
+declaration = []
+infer = []
+# `infer` many times a turn: its cost per call through an enclave's seat
+# processes (packages/enclave/tests/limits.rs).
+infer_many = []
+sockets = ["dep:wasip2"]
+handles = ["dep:wasip2"]
+bigcall = []
+badcalls = []
+
+[dependencies]
+botstadia-interface = { workspace = true, features = ["agent-guest"] }
+# For `sockets`: WASI's socket calls, made directly, so a refused socket is
+# told apart from one made but never bound.
+wasip2 = { version = "=1.0.4", optional = true }

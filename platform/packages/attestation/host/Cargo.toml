@@ -1,0 +1,21 @@
+[package]
+name = "botstadia-attestation-host"
+description = "Proving the attestation guest: dev mode for local work and tests, Groth16 for the testnet and prod prover."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+botstadia-attestation-core = { path = "../core" }
+botstadia-attestation-methods = { path = "../methods" }
+risc0-zkvm = { version = "3.0.6", default-features = false, features = ["client"] }
+anyhow = { workspace = true }
+hex = "0.4.3"
+
+[dev-dependencies]
+botstadia-attestation-core = { path = "../core", features = ["fixture", "mock"] }
+botstadia-chain = { workspace = true, features = ["native"] }
+tokio = { workspace = true }
+alloy-sol-types = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,49 @@
+[package]
+name = "botstadia-enclave"
+description = "The session runner: the program in every enclave image. It registers, fetches or mints the BundleKey, takes jobs (sessions, warm-ups, verification, rekey checks), anchors, runs sessions on botstadia-host and submits its own results."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Mock attestation, for the local target only (a native process with no
+# TEE). Refuses to build into an enclave image (`--cfg botstadia_image`).
+mock = ["botstadia-attestation-core/mock"]
+# A chain view held in memory, for tests of the rules the enclave applies.
+fake-chain = []
+# The in-process api transport, for tests: the machine routes answered by
+# botstadia-backend on SQLite. Left out of the public export.
+
+[dependencies]
+botstadia-attestation-core = { path = "../attestation/core" }
+botstadia-chain = { workspace = true, features = ["native"] }
+botstadia-shared = { workspace = true }
+botstadia-upload = { workspace = true }
+botstadia-host = { workspace = true }
+botstadia-sandbox = { path = "sandbox" }
+botstadia-rating = { workspace = true }
+botstadia-standings = { workspace = true }
+botstadia-seating = { workspace = true }
+botstadia-interface = { workspace = true }
+alloy-sol-types = { workspace = true }
+anyhow = { workspace = true }
+bincode = "1.3.3"
+getrandom = { workspace = true }
+hex = "0.4.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[[bin]]
+name = "botstadia-runner"
+path = "src/main.rs"
+
+[dev-dependencies]
+botstadia-enclave = { path = ".", features = ["mock", "fake-chain"] }
+botstadia-host = { workspace = true }
+
+[lints]
+workspace = true

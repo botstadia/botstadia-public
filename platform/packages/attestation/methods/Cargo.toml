@@ -1,0 +1,12 @@
+[package]
+name = "botstadia-attestation-methods"
+description = "The attestation guest, built for the RISC Zero zkVM: its ELF and image id."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[build-dependencies]
+risc0-build = { version = "3.0.6", features = ["docker"] }
+
+[package.metadata.risc0]
+methods = ["guest"]

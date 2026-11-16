@@ -1,0 +1,16 @@
+[package]
+name = "botstadia-standings"
+description = "BotStadia's standings version: the week's Swiss pairing, points, byes, tie-break and finalists, in exact integer arithmetic, so the keeper, the enclave and anyone checking us compute the same week."
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+serde_json = { workspace = true }
+hex = "0.4.3"
+
+[lints]
+workspace = true
