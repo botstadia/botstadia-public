@@ -11,11 +11,20 @@
 //!   rewrapping (the enclave and `botstadia rekey`)
 //! - [`proof`]: checking the BundleKey's boot proof before wrapping to it
 //!   (with feature `chain`)
+//! - [`client`]: the account side the CLI and the standalone tool share:
+//!   the config folder and author key storage, the api client, and the
+//!   `login`, `key`, `upload`, `status`, `rekey`, `confirm-wallet` and `sign`
+//!   commands (with feature `client`)
+//!
+//! With feature `tool`, it builds the standalone upload tool,
+//! `botstadia-upload`, made entirely from public source.
 //!
 //! This crate holds only code a builder's bundle touches, so it can be
 //! exported, alone, to the standalone upload tool's public repository.
 
 pub mod author;
+#[cfg(feature = "client")]
+pub mod client;
 #[cfg(feature = "chain")]
 pub mod proof;
 pub mod seal;

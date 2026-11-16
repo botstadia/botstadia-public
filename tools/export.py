@@ -190,10 +190,16 @@ def main():
     commit = git(args.source, "rev-parse", "--verify", f"{args.ref}^{{commit}}").strip()
     tracked = git(args.source, "ls-tree", "-r", "--full-tree", commit).splitlines()
 
-    out_dir = os.path.join(args.dest, args.dir)
-    if os.path.exists(out_dir):
+    out_dir = os.path.normpath(os.path.join(args.dest, args.dir))
+    if args.dir in (".", ""):
+        # The whole repository is this export's: empty it but for .git.
+        for entry in os.listdir(args.dest):
+            if entry != ".git":
+                path = os.path.join(args.dest, entry)
+                shutil.rmtree(path) if os.path.isdir(path) and not os.path.islink(path) else os.remove(path)
+    elif os.path.exists(out_dir):
         shutil.rmtree(out_dir)
-    os.makedirs(out_dir)
+    os.makedirs(out_dir, exist_ok=True)
     root_prefixes = [r.rstrip("/") + "/" for r in rules["root"]]
 
     copied = 0
@@ -236,7 +242,7 @@ def main():
         source_lock = git(args.source, "show", f"{commit}:Cargo.lock")
         with open(os.path.join(out_dir, "Cargo.lock"), "w") as f:
             f.write(source_lock)
-        written.update({f"{args.dir}/Cargo.toml", f"{args.dir}/Cargo.lock"})
+        written.update(os.path.relpath(os.path.join(out_dir, f), args.dest) for f in ("Cargo.toml", "Cargo.lock"))
         subprocess.run(
             ["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", os.path.join(out_dir, "Cargo.toml")],
             check=True,
@@ -249,7 +255,7 @@ def main():
     if rules["config"]:
         with open(os.path.join(out_dir, "config.yml"), "w") as f:
             f.write(config_subset(args.source, rules["config"]))
-        written.add(f"{args.dir}/config.yml")
+        written.add(os.path.relpath(os.path.join(out_dir, "config.yml"), args.dest))
 
     hits = scan(args.dest, written, rules)
     if hits:
@@ -288,7 +294,7 @@ def main():
         GIT_AUTHOR_DATE=when,
         GIT_COMMITTER_DATE=when,
     )
-    message = f"{args.dir}: export of {os.path.basename(os.path.abspath(args.source)).lower()} {commit[:12]}"
+    message = f"{args.dir if args.dir not in ('.', '') else 'export'}: export of {os.path.basename(os.path.abspath(args.source)).lower()} {commit[:12]}"
     subprocess.run(["git", "-C", args.dest, "commit", "-q", "-m", message], check=True, env=env)
     print(git(args.dest, "rev-parse", "HEAD").strip())
 
