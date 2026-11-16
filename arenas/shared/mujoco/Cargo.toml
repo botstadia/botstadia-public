@@ -1,0 +1,15 @@
+[package]
+name = "mujoco"
+description = "Safe MuJoCo for arena engines, over the vendored runtime in mujoco-sys: load a baked .mjb, step, read poses and contacts, edit the scenario."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+mujoco-sys = { path = "../mujoco-sys" }
+
+# FFI wrapper: it's where the unsafe lives, so it doesn't take the workspace's
+# deny.
+[lints.clippy]
+all = { level = "warn", priority = -1 }

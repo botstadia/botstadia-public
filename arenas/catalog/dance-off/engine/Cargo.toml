@@ -1,0 +1,14 @@
+[package]
+name = "dance-off-engine"
+description = "Dance-Off's world: rules, scoring and frames."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+arena-kit = { path = "../../../shared/arena-kit" }
+dance-off-declaration = { path = "../declaration" }
+
+[lints]
+workspace = true

@@ -1,0 +1,85 @@
+<!-- Quadcopter Racing's robot: the Skydio X2.
+
+     Copied from MuJoCo Menagerie's skydio_x2/x2.xml (Menagerie commit
+     c1a4eeb85694ae1dffe33ff1797d4e528928a133, 2026-08-04; the model is
+     Apache-2.0, see X2-LICENSE). The mesh and its texture still come from
+     Menagerie's assets/ (the bake compiles from there, see bake.toml).
+
+     Changes, each for a reason:
+     - The <option> removed: world.xml sets the timestep, solver and the air
+       (density 1.225, viscosity 1.8e-5, as the original), since an attached
+       model's options are ignored.
+     - The tracking spotlight, the tracking camera and the hover keyframe
+       removed: the scene has its own lights and cameras, and world.xml's
+       `start` keyframe places all six drones.
+     - The body sits at its frame's origin (the original lifts it 0.1 m):
+       world.xml places each drone on its pad.
+     - The sensors removed: the engine reads the body's state directly and
+       builds the same gyro and gravity readings itself; unused sensors only
+       cost time.
+     - Collision geoms are contype 1, conaffinity 3, so a drone collides
+       with the ground, the pads and other drones (1) and with the course's
+       gates and obstacles (2), which collide with nothing else.
+     - The visual mesh geom is named `shell`, so its scene node keeps a name
+       across re-imports (it carries no physics).
+     Everything else, the 1.325 kg body (four 0.25 kg rotors and the 0.325 kg
+     core), its collision boxes and rotor ellipsoids, the four 0 to 13 N
+     thrust motors and their yaw torque coefficients, is as published. The
+     body's name is the seam to the presentation: never rename. -->
+<mujoco model="racing_x2">
+  <compiler autolimits="true" assetdir="assets"/>
+
+  <default>
+    <default class="x2">
+      <geom mass="0"/>
+      <motor ctrlrange="0 13"/>
+      <mesh scale="0.01 0.01 0.01"/>
+      <default class="visual">
+        <geom group="2" type="mesh" contype="0" conaffinity="0"/>
+      </default>
+      <default class="collision">
+        <geom group="3" type="box" contype="1" conaffinity="3"/>
+        <default class="rotor">
+          <geom type="ellipsoid" size=".13 .13 .01"/>
+        </default>
+      </default>
+      <site group="5"/>
+    </default>
+  </default>
+
+  <asset>
+    <texture type="2d" file="X2_lowpoly_texture_SpinningProps_1024.png"/>
+    <material name="phong3SG" texture="X2_lowpoly_texture_SpinningProps_1024"/>
+    <material name="invisible" rgba="0 0 0 0"/>
+
+    <mesh class="x2" file="X2_lowpoly.obj"/>
+  </asset>
+
+  <worldbody>
+    <body name="x2" childclass="x2">
+      <freejoint/>
+      <site name="imu" pos="0 0 .02"/>
+      <geom name="shell" material="phong3SG" mesh="X2_lowpoly" class="visual" quat="0 0 1 1"/>
+      <geom class="collision" size=".06 .027 .02" pos=".04 0 .02"/>
+      <geom class="collision" size=".06 .027 .02" pos=".04 0 .06"/>
+      <geom class="collision" size=".05 .027 .02" pos="-.07 0 .065"/>
+      <geom class="collision" size=".023 .017 .01" pos="-.137 .008 .065" quat="1 0 0 1"/>
+      <geom name="rotor1" class="rotor" pos="-.14 -.18 .05" mass=".25"/>
+      <geom name="rotor2" class="rotor" pos="-.14 .18 .05" mass=".25"/>
+      <geom name="rotor3" class="rotor" pos=".14 .18 .08" mass=".25"/>
+      <geom name="rotor4" class="rotor" pos=".14 -.18 .08" mass=".25"/>
+      <geom size=".16 .04 .02" pos="0 0 0.02" type="ellipsoid" mass=".325" class="visual" material="invisible"/>
+      <site name="thrust1" pos="-.14 -.18 .05"/>
+      <site name="thrust2" pos="-.14 .18 .05"/>
+      <site name="thrust3" pos=".14 .18 .08"/>
+      <site name="thrust4" pos=".14 -.18 .08"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor class="x2" name="thrust1" site="thrust1" gear="0 0 1 0 0 -.0201"/>
+    <motor class="x2" name="thrust2" site="thrust2" gear="0 0 1 0 0 .0201"/>
+    <motor class="x2" name="thrust3" site="thrust3" gear="0 0 1 0 0 -.0201"/>
+    <motor class="x2" name="thrust4" site="thrust4" gear="0 0 1 0 0 .0201"/>
+  </actuator>
+</mujoco>

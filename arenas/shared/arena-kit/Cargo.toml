@@ -1,0 +1,25 @@
+[package]
+name = "arena-kit"
+description = "The engine side of an arena, written once: the World trait, the session runtime, the export macro, typed reporting, seeded streams, MuJoCo frame helpers and the required world tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Turn the world into the `arena` WASM component (the component crate only).
+guest = ["botstadia-interface/arena-guest"]
+
+[dependencies]
+botstadia-interface = { workspace = true }
+mujoco = { path = "../mujoco" }
+replay-wire = { path = "../replay-wire" }
+sha2 = "0.10.9"
+
+[[example]]
+name = "swing"
+crate-type = ["cdylib"]
+required-features = ["guest"]
+
+[lints]
+workspace = true

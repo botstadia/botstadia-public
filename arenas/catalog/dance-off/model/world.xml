@@ -1,0 +1,50 @@
+<!-- Dance-Off's world: a flat stage and two Unitree G1s (dance_g1.xml)
+     attached as left_ and right_, side by side 2.2 m apart, both facing the
+     audience. Body names are the seam to the scene, so they're frozen:
+     world, then left_pelvis … left_right_wrist_yaw_link, then right_ likewise.
+
+     The stage is the plane. The dancers never collide with each other (the
+     bake's edits.py sets their contact types), so nothing else is in the
+     physics: the look (deck, truss, lights, the pose-card board) is the
+     scene's, imported from the masters, and the robots are dropped into it.
+
+     Frames: the scene is Y-up and its audience looks along -Z; MuJoCo is
+     Z-up, and the sim instance's root turns MuJoCo (x, y, z) into the scene's
+     (x, z, -y). So "toward the audience" is -y here, and the dancers face it
+     with a quarter turn about z. The left dancer is on the audience's left. -->
+<mujoco model="dance-off">
+  <compiler angle="radian" discardvisual="true"/>
+  <!-- The G1 MJX model's own settings (its <option> is ignored on attach): a 4 ms
+       step, implicitfast, no Euler damping. Fixed iterations bound the worst
+       case step time. -->
+  <option timestep="0.004" integrator="implicitfast" iterations="20" ls_iterations="20">
+    <flag eulerdamp="disable"/>
+  </option>
+
+  <asset>
+    <model name="g1" file="dance_g1.xml"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 6" dir="0 0 -1"/>
+    <!-- Group 3: the scene's own deck is the stage the audience sees, so this
+         plane stays out of the exported visuals (groups 0-2). -->
+    <geom name="stage" type="plane" group="3" size="6 6 0.1" contype="1" conaffinity="1" condim="3" friction="1 0.005 0.0001" rgba="0.15 0.15 0.18 1"/>
+
+    <!-- Both dancers face the audience (-y), 1.1 m either side of centre. -->
+    <frame name="left_mark" pos="-1.1 0 0" quat="0.70710678 0 0 -0.70710678">
+      <attach model="g1" body="pelvis" prefix="left_"/>
+    </frame>
+    <frame name="right_mark" pos="1.1 0 0" quat="0.70710678 0 0 -0.70710678">
+      <attach model="g1" body="pelvis" prefix="right_"/>
+    </frame>
+  </worldbody>
+
+  <!-- The start: both dancers in the G1's "home" stance (knees slightly bent,
+       arms at the sides), on their marks, facing the audience. Every qpos and ctrl. -->
+  <keyframe>
+    <key name="start"
+      qpos="-1.1 0 0.783675 0.70710678 0 0 -0.70710678 -0.1 0 0 0.3 -0.2 0 -0.1 0 0 0.3 -0.2 0 0 0 0 0.2 0.2 0 1.28 0 0 0 0.2 -0.2 0 1.28 0 0 0  1.1 0 0.783675 0.70710678 0 0 -0.70710678 -0.1 0 0 0.3 -0.2 0 -0.1 0 0 0.3 -0.2 0 0 0 0 0.2 0.2 0 1.28 0 0 0 0.2 -0.2 0 1.28 0 0 0"
+      ctrl="-0.1 0 0 0.3 -0.2 0 -0.1 0 0 0.3 -0.2 0 0 0 0 0.2 0.2 0 1.28 0 0 0 0.2 -0.2 0 1.28 0 0 0  -0.1 0 0 0.3 -0.2 0 -0.1 0 0 0.3 -0.2 0 0 0 0 0.2 0.2 0 1.28 0 0 0 0.2 -0.2 0 1.28 0 0 0"/>
+  </keyframe>
+</mujoco>

@@ -1,0 +1,17 @@
+<!-- A one-joint pendulum: the smallest model the mujoco crate's tests load. -->
+<mujoco model="pendulum">
+  <compiler angle="radian" discardvisual="true"/>
+  <option timestep="0.005"/>
+  <worldbody>
+    <body name="arm" pos="0 0 1">
+      <joint name="hinge" type="hinge" axis="0 1 0" damping="0.1"/>
+      <geom type="capsule" fromto="0 0 0 0 0 -0.5" size="0.04" mass="1"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor name="motor" joint="hinge" ctrlrange="-1 1" ctrllimited="true" gear="5"/>
+  </actuator>
+  <keyframe>
+    <key name="start" qpos="0" ctrl="0"/>
+  </keyframe>
+</mujoco>

@@ -1,0 +1,17 @@
+[package]
+name = "racing-component"
+description = "Quadcopter Racing's engine as the `arena` WASM component."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+arena-kit = { path = "../../../shared/arena-kit", features = ["guest"] }
+racing-engine = { path = "../engine" }
+
+[lints]
+workspace = true

@@ -1,0 +1,50 @@
+# The arenas: the crates they share, and one directory per arena in catalog/.
+#
+# Targets are chosen per command, never per crate:
+# - wasm32-wasip2:          each arena's engine component
+# - wasm32-unknown-unknown: each arena's player (trunk)
+# - native:                 tests, and the hook check
+#
+# Each arena's crates are listed under `members`, between the markers below,
+# by the authoring tools (`arena:new` adds them, `arena:remove` takes them out, and
+# its checks fail if the list and catalog/ disagree). They aren't globs
+# because Cargo reads a glob that matches nothing as a literal path, which
+# breaks the workspace whenever the catalog is empty.
+[workspace]
+resolver = "3"
+members = [
+    "shared/arena-kit",
+    "shared/mujoco",
+    "shared/mujoco-sys",
+    "shared/replay-wire",
+    "catalog/boxing/component",
+    "catalog/boxing/declaration",
+    "catalog/boxing/engine",
+    "catalog/dance-off/component",
+    "catalog/dance-off/declaration",
+    "catalog/dance-off/engine",
+    "catalog/racing/component",
+    "catalog/racing/declaration",
+    "catalog/racing/engine",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+botstadia-interface = "0.1.0"
+
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"

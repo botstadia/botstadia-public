@@ -1,0 +1,13 @@
+[package]
+name = "racing-declaration"
+description = "Quadcopter Racing's declaration: what its engine says about itself."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+arena-kit = { path = "../../../shared/arena-kit" }
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "dance-off-component"
+description = "Dance-Off's engine as the `arena` WASM component."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+arena-kit = { path = "../../../shared/arena-kit", features = ["guest"] }
+dance-off-engine = { path = "../engine" }
+
+[lints]
+workspace = true
