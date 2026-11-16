@@ -28,7 +28,7 @@ fn held_of(n: usize, kinds: &[&str]) -> Held {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|b| kinds.contains(&b["kind"].as_str().unwrap_or("")))
+        .filter(|b| kinds.contains(&b["kind"].as_str().unwrap_or("")) && b["superseded"] != true)
         .map(|b| b["digest"].as_str().unwrap().to_string())
         .collect();
     digests.sort_by_key(|d| {
@@ -277,6 +277,8 @@ fn every_racing_seed_bot_verifies_isolated_as_in_process() {
     for b in read("bot/catalog/racing/latest.json")["bots"]
         .as_array()
         .unwrap()
+        .iter()
+        .filter(|b| b["superseded"] != true)
     {
         let digest = b["digest"].as_str().unwrap();
         let zip = cdn.seed_bot("racing", digest).unwrap();

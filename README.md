@@ -33,7 +33,7 @@ git clone https://github.com/botstadia/botstadia-public && cd botstadia-public
 
 `verify.sh` builds from the tagged commit alone, in Docker images pinned by digest, with no network during the compile, and fails unless the digest matches the tag. The same check runs on GitHub: Actions, "Verify a tag", Run workflow (in a fork if you like).
 
-What makes each build reproducible is written at the top of its Dockerfile: `platform/packages/enclave/image/Dockerfile`, `platform/packages/shell/Dockerfile`, `platform/packages/exit-page/Dockerfile` and `arenas/Dockerfile`. The guest is built by RISC Zero's own pinned Docker builder (`platform/packages/attestation/methods/build.rs`). An image's `SOURCE_DATE_EPOCH` is its tag's commit time.
+What makes each build reproducible is written at the top of its Dockerfile: `platform/packages/enclave/image/Dockerfile`, `platform/packages/shell/Dockerfile`, `platform/packages/exit-page/Dockerfile` and `arenas/Dockerfile`. The guest is built by RISC Zero's own pinned Docker builder (`platform/packages/attestation/methods/build.rs`). An image's `SOURCE_DATE_EPOCH` is the time of the last commit at or before its tag that changed `platform/` (`git log -1 --format=%ct <tag> -- platform`).
 
 To see what changed between two approved images, diff their tags: `git diff image-testnet/sha256-<old> image-testnet/sha256-<new> -- platform`.
 

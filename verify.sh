@@ -51,7 +51,9 @@ build() {
     image)
       [ -n "$arg" ] || die "image needs a target (testnet or prod)"
       builder
-      epoch=$(git log -1 --format=%ct "$commit")
+      # The last change to platform/, so a commit elsewhere (a list, the
+      # arenas) never moves the image's digest.
+      epoch=$(git log -1 --format=%ct "$commit" -- platform)
       tree platform | docker buildx build --builder "$B" \
         --platform linux/amd64 \
         --build-arg TARGET="$arg" --build-arg SOURCE_DATE_EPOCH="$epoch" \
