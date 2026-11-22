@@ -127,6 +127,14 @@ pub fn approve_paymaster(c: &Contracts) -> Call {
     approve(c, c.paymaster, U256::from(super::paymaster::ALLOWANCE))
 }
 
+/// A builder's shares whose transfer failed, claimed by the payout address.
+pub fn claim_builder_owed(c: &Contracts) -> Call {
+    call(
+        c.settlement,
+        Settlement::claimBuilderOwedCall {}.abi_encode(),
+    )
+}
+
 /// The eligibility statement, made by the wallet calling the contract
 /// itself: no signature, since only the wallet can be the caller.
 pub fn make_statement(c: &Contracts) -> Call {

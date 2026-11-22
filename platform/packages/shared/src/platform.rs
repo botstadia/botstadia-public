@@ -687,6 +687,8 @@ pub struct HeldStatement {
 pub struct AccountBots {
     pub bots: Vec<AccountBot>,
     pub bot_cap: u64,
+    /// The wait before a retirement or a bind takes effect, in seconds.
+    pub waiting_period_s: u64,
     /// The address in force; zero isn't earning.
     pub payout_address: String,
     pub held: Option<HeldStatement>,
