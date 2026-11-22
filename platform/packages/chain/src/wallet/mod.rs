@@ -24,13 +24,14 @@ pub mod bundler;
 pub mod calls;
 pub mod check;
 pub mod flow;
+pub mod money;
 pub mod op;
 pub mod paymaster;
 pub mod recovery;
 pub mod safe;
 pub mod webauthn;
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, U256, keccak256};
 use serde::{Deserialize, Serialize};
 
 /// The contracts an account wallet is set up with and talks to, one set per
@@ -80,6 +81,17 @@ pub struct Contracts {
 
 fn default_usdc_name() -> String {
     "USDC".into()
+}
+
+/// A payout statement's name for its account (MONEY.md#how-a-builder-earns):
+/// published with it, so anyone can check the signature. One way from the
+/// account's id, which would give away its group in every week
+/// ([`crate::entry::group_id`]) and is never published. The page works it out
+/// itself, so the server never chooses what's signed.
+pub fn statement_ref(account: &str) -> String {
+    let mut bytes = b"botstadia-statement\n".to_vec();
+    bytes.extend_from_slice(account.as_bytes());
+    format!("{:#x}", keccak256(bytes))
 }
 
 impl Contracts {

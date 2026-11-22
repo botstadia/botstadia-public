@@ -267,3 +267,56 @@ async fn an_entry_that_never_sends_ends_its_job_with_the_reason() {
     let why = one.try_recv().unwrap().unwrap_err();
     assert!(why.contains("KeyNotActive"), "{why}");
 }
+
+#[tokio::test]
+async fn a_failed_batch_waits_for_its_window() {
+    let fake = Fake {
+        hold_over: 100_000,
+        refuse: RefCell::new(1),
+        ..Default::default()
+    };
+    let limits = BatchLimits {
+        window_ms: 1_000,
+        size: 40,
+        age_ms: 500,
+        hold_polls: 2,
+        give_up_ms: 60_000,
+    };
+    let b = Batcher::new(Address::repeat_byte(5), limits);
+    let _rx = b.queue(rating(1), 0);
+    assert!(b.due(600, false), "its age");
+    assert!(b.flush(&fake, 600, tokio::task::yield_now).await.is_err());
+    assert!(!b.due(850, false), "never again on the loop's next turn");
+    assert!(b.due(1_000, true), "at the boundary");
+    // The runner's boundary is consumed by a failing heartbeat: the next
+    // window sends without one (a batch can never stall, and the api is
+    // never in a result's path).
+    assert!(b.due(1_001, false), "the next window, boundary or not");
+}
+
+#[tokio::test]
+async fn an_old_failure_never_sends_a_new_entry_at_once() {
+    let fake = Fake {
+        hold_over: 100_000,
+        refuse: RefCell::new(1),
+        ..Default::default()
+    };
+    let limits = BatchLimits {
+        window_ms: 1_000,
+        size: 40,
+        age_ms: 500,
+        hold_polls: 2,
+        give_up_ms: 100,
+    };
+    let b = Batcher::new(Address::repeat_byte(5), limits);
+    let _rx = b.queue(rating(1), 0);
+    // Given up: the queue empties, the failure stands.
+    assert!(b.flush(&fake, 600, tokio::task::yield_now).await.is_err());
+    assert_eq!(b.held(600).0, 0);
+    let _rx = b.queue(rating(2), 5_100);
+    assert!(
+        !b.due(5_100, false),
+        "a send now would say when the session ended"
+    );
+    assert!(b.due(5_100, true), "its window does");
+}

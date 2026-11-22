@@ -103,6 +103,32 @@ fn random32() -> anyhow::Result<[u8; 32]> {
     Ok(b)
 }
 
+/// How far a peer's block time may trail ours when it judges our token: an
+/// older holder reads its head before it reads its inbox.
+const HEAD_LAG_S: u64 = 3;
+/// Pauses a token not yet valid is waited out for.
+const NOT_YET_POLLS: usize = 30;
+
+/// Wait until `token` is valid by a head `lag` behind ours: Google issues
+/// on its own clock, which runs a little ahead of the newest block.
+async fn until_valid<F: std::future::Future<Output = ()>>(
+    token: &str,
+    lag: u64,
+    now_s: &impl Fn() -> u64,
+    pause: &impl Fn() -> F,
+) {
+    for _ in 0..NOT_YET_POLLS {
+        let at = now_s().saturating_sub(lag);
+        if !matches!(
+            verify_token(token, &[], at),
+            Err(botstadia_attestation_core::Error::NotFresh)
+        ) {
+            return;
+        }
+        pause().await;
+    }
+}
+
 /// Check a peer's token and binding (step 3 and 4): everything from the
 /// token and the chain, nothing on the api's say-so.
 pub async fn check_peer(
@@ -263,6 +289,14 @@ pub async fn fetch<T: Transport, F: std::future::Future<Output = ()>>(
             match m.kind.as_str() {
                 "challenge" if holder_binding.is_none() => {
                     let binding = binding_from(&body["binding"])?;
+                    let theirs = body["token"].as_str().unwrap_or("");
+                    until_valid(theirs, 0, &now_s, &pause).await;
+                    // An earlier attempt's answer, still in the inbox.
+                    if let Ok(t) = verify_token(theirs, &[], now_s())
+                        && !t.nonces.contains(&binding.handover_nonce(&c_r))
+                    {
+                        continue;
+                    }
                     check_peer(
                         view,
                         ctx,
@@ -286,6 +320,8 @@ pub async fn fetch<T: Transport, F: std::future::Future<Output = ()>>(
                         instruction,
                     };
                     let token = attester.token(&[mine.handover_nonce(&c_h)], now_s())?;
+                    // Sent at once, it would be refused as issued in the future.
+                    until_valid(&token, HEAD_LAG_S, &now_s, &pause).await;
                     send(
                         machine,
                         &m.from,
@@ -296,15 +332,15 @@ pub async fn fetch<T: Transport, F: std::future::Future<Output = ()>>(
                     holder_binding = Some(binding);
                 }
                 "reply" => {
-                    let binding = holder_binding
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("a reply before the exchange"))?;
+                    // An earlier attempt's, or before this exchange: not ours.
+                    let Some(binding) = holder_binding.as_ref() else {
+                        continue;
+                    };
                     let wrapped = body["wrapped"].as_str().unwrap_or("");
                     let to = body["to"].as_str().unwrap_or("");
-                    anyhow::ensure!(
-                        to == format!("0x{}", hex::encode(eph_public)),
-                        "the reply is sealed to another key"
-                    );
+                    if to != format!("0x{}", hex::encode(eph_public)) {
+                        continue;
+                    }
                     let sig: botstadia_chain::Bytes =
                         body["signature"].as_str().unwrap_or("").parse()?;
                     let signer = recover(reply_message(wrapped, to).as_bytes(), &sig)?;
@@ -360,7 +396,7 @@ pub async fn serve<T: Transport>(
     ctx: &Context,
     key: &BundleKey,
     state: &mut Holding,
-    now_s: u64,
+    now: impl AsyncFn() -> u64,
 ) -> anyhow::Result<usize> {
     let mut handed = 0;
     let mine = Binding {
@@ -370,7 +406,14 @@ pub async fn serve<T: Transport>(
         results: ctx.results.0.0,
         instruction: key.instruction,
     };
-    for m in inbox(machine).await? {
+    let messages = inbox(machine).await?;
+    if messages.is_empty() {
+        return Ok(0);
+    }
+    // Only now, and fresh: a peer's token issued after the newest block we
+    // know of would be refused. With nothing to answer, the chain isn't asked.
+    let now_s = now().await;
+    for m in messages {
         let body: Value = serde_json::from_str(&m.body).unwrap_or_default();
         let from = m.from.to_lowercase();
         let outcome: anyhow::Result<()> = async {

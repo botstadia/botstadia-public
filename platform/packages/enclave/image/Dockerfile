@@ -25,7 +25,17 @@
 # once the enclave is registered, so no attestation token carries them.
 
 ARG RUST_IMAGE=rust:1.98.0-slim-bookworm@sha256:1469a27c125cb5a3aebfa4f4e4665d935b02fb72cc093b2c974b3d740e43f157
+ARG UNPACK_IMAGE=busybox:1.37.0-musl@sha256:f6a95d611e0a8780fabdb2aec43e31275b2720dfefa3e41b16835bfc42454478
 ARG RUN_IMAGE=gcr.io/distroless/cc-debian12@sha256:e5d81ddde149641e2a9ba55be4545bc125c67de07508b03ba4c22e6eb0ded5aa
+
+# ONNX Runtime's library from Microsoft's own NuGet package: a zip, which the
+# Rust image can't open. This stage only unpacks, and isn't trusted to: the
+# library's own hash is checked below, in the Rust image.
+FROM --platform=linux/amd64 ${UNPACK_IMAGE} AS onnxruntime
+ADD --checksum=sha256:769d1d3ea8ab6cd69f737c9dd4d4462aa4ad0ccfa106eaf506efc40d7bead5db \
+    https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.28.0/microsoft.ml.onnxruntime.1.28.0.nupkg /tmp/onnxruntime.nupkg
+RUN --network=none mkdir /out && \
+    unzip -p /tmp/onnxruntime.nupkg runtimes/linux-x64/native/libonnxruntime.so > /out/libonnxruntime.so.1.28.0
 
 # The toolchain rust-toolchain.toml pins, and every dependency's source.
 FROM --platform=linux/amd64 ${RUST_IMAGE} AS vendor
@@ -35,13 +45,15 @@ RUN rustup show active-toolchain || rustup toolchain install
 COPY . .
 RUN mkdir -p .cargo && cargo vendor --locked --versioned-dirs vendor > .cargo/config.toml
 
-# ONNX Runtime, the inference host's library: Microsoft's own release,
-# checked against .github/onnxruntime.sha256's hash, linked dynamically.
-ADD --checksum=sha256:a3e1b79d7bb1bf09696ce675f49e4064e6c81f6202b8225624fff0e93f8d6407 \
-    https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-linux-x64-1.28.0.tgz /tmp/onnxruntime.tgz
-RUN mkdir -p /opt/onnxruntime && \
-    tar -xzf /tmp/onnxruntime.tgz -C /opt/onnxruntime --strip-components=1 --no-same-owner && \
-    ln -sf libonnxruntime.so.1 /opt/onnxruntime/lib/libonnxruntime.so
+# ONNX Runtime, the inference host's library: Microsoft's own build, linked
+# dynamically. This hash is also that of the library in the images built from
+# Microsoft's GitHub archive of 1.28.0.
+# That one file and its mode, set here: anything else the unpack stage left
+# would be on the linker's search path, unchecked.
+COPY --from=onnxruntime --chmod=0755 /out/libonnxruntime.so.1.28.0 /opt/onnxruntime/lib/libonnxruntime.so.1.28.0
+RUN echo "1461ef7cc3d9e49982591721683cc3e3a55580aeca9a5254e7aac47b75ee4bab  /opt/onnxruntime/lib/libonnxruntime.so.1.28.0" | sha256sum -c - && \
+    ln -s libonnxruntime.so.1.28.0 /opt/onnxruntime/lib/libonnxruntime.so.1 && \
+    ln -s libonnxruntime.so.1 /opt/onnxruntime/lib/libonnxruntime.so
 
 # The runner, compiled with no network.
 FROM vendor AS build

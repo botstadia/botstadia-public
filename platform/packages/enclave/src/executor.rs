@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use botstadia_chain::abi::Results;
 use botstadia_chain::outcome::Outcome as ChainOutcome;
-use botstadia_chain::rpc::{BlockTag, Client, Http};
 use botstadia_chain::sign::ResultMessage;
 use botstadia_chain::{Address, B256};
 use botstadia_shared::api::Empty;
@@ -19,7 +18,7 @@ use crate::anchor::{Anchored, past_close, room_to_anchor, wait_final};
 use crate::batch::{Batcher, Entry, Landed};
 use crate::bundle_key::BundleKey;
 use crate::cdn::AnyCdn;
-use crate::chain_view::{ChainView, TwoProviders};
+use crate::chain_view::{ChainView, TwoProviders, client, serving};
 use crate::client::{Http as ApiHttp, Machine};
 use crate::hold::{SessionPayload, hold};
 use crate::play;
@@ -38,6 +37,7 @@ pub struct JobExecutor {
     /// Anchors, one batch per window (TRUST.md#how-the-enclave-talks-to-
     /// the-chain).
     pub anchors: Arc<Batcher>,
+    pub ran: crate::anchor::RunOnce,
 }
 
 fn sleep(ms: u64) -> tokio::time::Sleep {
@@ -51,15 +51,47 @@ fn failed(why: impl std::fmt::Display) -> Outcome {
     }
 }
 
+// How often a waiting job asks the chain. Free RPC tiers pay for each ask,
+// and none of these waits is decided by seconds.
+/// For a close to pass: the anchor's batch window is minutes.
+const CLOSE_POLL_MS: u64 = 3_000;
+/// For finality, which takes about twenty minutes.
+const FINAL_POLL_MS: u64 = 10_000;
+/// Until the result deadline: finality may lag for hours, and giving up
+/// ends a bound session with no result.
+const FINAL_POLLS: usize = (crate::constants::RESULT_DEADLINE_S * 1000 / FINAL_POLL_MS) as usize;
+/// Between tries of a bound session's read.
+const RETRY_MS: u64 = 10_000;
+/// Reads, that far apart, before a send that errored counts as not landed.
+const LANDED_LOOKS: usize = 6;
+/// Searches for a lost anchor's block at the quick pace, each about 25
+/// reads; after them, one every ten minutes to the deadline.
+const SEARCHES: usize = 30;
+const SEARCH_SLOW_MS: u64 = 600_000;
+
+/// A bound session's read, retried to the deadline: giving up ends it with
+/// no result, and nobody runs it again (TRUST.md#every-session-one-flow).
+macro_rules! until_deadline {
+    ($until:expr, $read:expr) => {
+        loop {
+            match $read {
+                Ok(v) => break Ok(v),
+                Err(e) if now_ms() >= $until => break Err(e),
+                Err(e) => {
+                    eprintln!("a bound session's read failed, trying again: {e:#}");
+                    sleep(RETRY_MS).await;
+                }
+            }
+        }
+    };
+}
+/// For the anchor's minimum age, fifteen minutes.
+const AGE_POLL_MS: u64 = 5_000;
+
 impl JobExecutor {
-    fn submitter(&self) -> ChainSubmitter {
+    fn submitter(&self, urls: &[String]) -> ChainSubmitter {
         ChainSubmitter {
-            providers: self
-                .settings
-                .rpc_urls
-                .iter()
-                .map(|u| Client::new(Http::new(u.clone())))
-                .collect(),
+            providers: urls.iter().map(|u| client(u)).collect(),
             key: self.machine.key().clone(),
             chain_id: self.settings.chain_id,
             results: self.settings.results,
@@ -68,13 +100,56 @@ impl JobExecutor {
         }
     }
 
+    /// The providers serving the binding's chain now: checked for each job.
+    async fn urls(&self) -> anyhow::Result<Vec<String>> {
+        serving(&self.settings.rpc_urls, self.settings.chain_id).await
+    }
+
     async fn view(&self) -> anyhow::Result<TwoProviders> {
-        TwoProviders::connect(
-            &self.settings.rpc_urls,
-            self.settings.chain_id,
-            self.settings.results,
-        )
-        .await
+        Ok(Self::view_of(&self.urls().await?, self.settings.results))
+    }
+
+    fn view_of(urls: &[String], results: Address) -> TwoProviders {
+        TwoProviders::new(urls.iter().map(|u| client(u)).collect(), results)
+    }
+
+    /// After an anchor batch that errored or was skipped, the chain's word:
+    /// a send whose answer was lost may have bound the session to this key.
+    /// `None`: not anchored at all.
+    async fn anchor_landed(
+        view: &TwoProviders,
+        session: B256,
+        spec_hash: B256,
+        until: u64,
+    ) -> anyhow::Result<Option<(Address, Option<(B256, u64)>)>> {
+        let (mut unbound, mut searches) = (0, 0);
+        loop {
+            let (key, time) = until_deadline!(until, view.anchor_included(session).await)?;
+            if key != Address::ZERO {
+                match view.lost_anchor(session, time, spec_hash).await {
+                    Ok(at) => return Ok(Some((key, Some(at)))),
+                    Err(e) => {
+                        searches += 1;
+                        // Each reads the binding again: a reorg moves it.
+                        anyhow::ensure!(now_ms() < until, "no anchor found: {e:#}");
+                        eprintln!("the lost anchor isn't found yet: {e:#}");
+                        // Bound: never ended by a bad few minutes, only asked less.
+                        let wait = if searches < SEARCHES {
+                            RETRY_MS
+                        } else {
+                            SEARCH_SLOW_MS
+                        };
+                        sleep(wait).await;
+                        continue;
+                    }
+                }
+            }
+            unbound += 1;
+            if unbound >= LANDED_LOOKS {
+                return Ok(None);
+            }
+            sleep(RETRY_MS).await;
+        }
     }
 
     fn cdn(&self) -> AnyCdn {
@@ -95,8 +170,9 @@ impl JobExecutor {
     }
 
     async fn session(&self, payload: &Value) -> anyhow::Result<Outcome> {
-        let view = self.view().await?;
-        let sub = self.submitter();
+        let urls = self.urls().await?;
+        let view = Self::view_of(&urls, self.settings.results);
+        let sub = self.submitter(&urls);
         let p: SessionPayload = serde_json::from_value(payload.clone())?;
         let spec_hash = p.spec.hash();
         let held = match hold(&self.machine, &view, &self.cdn(), &self.bundle_key, p).await {
@@ -113,8 +189,20 @@ impl JobExecutor {
         let me = self.machine.key().address();
         let mut held = held;
         loop {
-            while !past_close(&sub, held.payload.close).await? {
-                sleep(500).await;
+            let mut unread = 0u32;
+            loop {
+                match past_close(&sub, held.payload.close).await {
+                    Ok(true) => break,
+                    Ok(false) => unread = 0,
+                    Err(e) => {
+                        unread += 1;
+                        // Unanchored still: five minutes unread gives it back.
+                        if unread >= 100 {
+                            return Ok(given_back(format!("no head to anchor by: {e:#}")));
+                        }
+                    }
+                }
+                sleep(CLOSE_POLL_MS).await;
             }
             // Never an anchor whose result couldn't land in time: the
             // finality lag now, the longest session, the result's age.
@@ -142,20 +230,21 @@ impl JobExecutor {
                 },
                 now_ms(),
             );
-            if let Err(why) = Self::landed(rx).await {
-                // Not anchored at all (never sent, or skipped before its
-                // anchor): another machine may still anchor it in time.
-                // Bound to this key, though its batch's receipt was lost:
-                // the anchor hash isn't on-chain to run it from, so it ends.
-                return Ok(match view.bound_key(session).await {
-                    Ok(k) if k == Address::ZERO => {
-                        given_back(format!("anchor not landed: {why:#}"))
+            let until = (held.payload.close + crate::constants::RESULT_DEADLINE_S) * 1000;
+            let sent = Self::landed(rx).await;
+            let (anchor, block) = match (sent, self.anchors.anchor_of(session)) {
+                (Ok(_), Some(at)) => at,
+                (sent, _) => {
+                    let why = sent
+                        .err()
+                        .map_or("no anchor in its batch".into(), |e| format!("{e:#}"));
+                    match Self::anchor_landed(&view, session, spec_hash, until).await {
+                        Ok(None) => return Ok(given_back(format!("anchor not landed: {why}"))),
+                        Ok(Some((key, Some(at)))) if key == me => at,
+                        Ok(Some(_)) => return Ok(failed(format!("anchor refused: {why}"))),
+                        Err(e) => return Ok(failed(format!("anchor unknown: {why}: {e:#}"))),
                     }
-                    _ => failed(format!("anchor refused: {why:#}")),
-                });
-            }
-            let Some((anchor, block)) = self.anchors.anchor_of(session) else {
-                return Ok(failed("anchor refused: no anchor in its batch"));
+                }
             };
             let a = Anchored {
                 session,
@@ -163,11 +252,20 @@ impl JobExecutor {
                 anchor,
                 block,
             };
-            wait_final(&view, a.included_in(), || sleep(500), 7200).await?;
+            // Bound from here: nothing gives it back.
+            if let Err(e) =
+                wait_final(&view, a.included_in(), || sleep(FINAL_POLL_MS), FINAL_POLLS).await
+            {
+                return Ok(failed(format!("after its anchor: {e:#}")));
+            }
             // Final and still ours: run it. Rolled back: nothing has run, so
             // every rule it was anchored on is checked again against the
             // chain as it is now before it's resubmitted.
-            if view.bound_key(session).await? == me {
+            let bound = match until_deadline!(until, view.bound_key(session).await) {
+                Ok(bound) => bound,
+                Err(e) => return Ok(failed(format!("after its anchor: {e:#}"))),
+            };
+            if bound == me {
                 // From the anchor on, the session is this key's alone: a
                 // failure is reported as one, in claim order, never given
                 // back.
@@ -204,7 +302,19 @@ impl JobExecutor {
         a: crate::anchor::Anchored,
         spec_hash: B256,
     ) -> anyhow::Result<Outcome> {
-        wait_final(view, a.included_in(), || sleep(500), 7200).await?;
+        wait_final(view, a.included_in(), || sleep(FINAL_POLL_MS), FINAL_POLLS).await?;
+        // The contract's minimum age, by its own anchor time, waited out
+        // before play: so nothing is read when a session ends, which the
+        // providers' logs would show.
+        let until = (held.payload.close + crate::constants::RESULT_DEADLINE_S) * 1000;
+        let due = until_deadline!(until, view.anchor_time(a.session).await)? + RESULT_MIN_AGE_S;
+        while until_deadline!(until, crate::chain_view::head_time(&sub.providers).await)? < due {
+            anyhow::ensure!(now_ms() < until, "the anchor's minimum age never passed");
+            sleep(AGE_POLL_MS).await;
+        }
+        // The last thing before a seed exists: recovering a duplicate's
+        // binding from the chain must never mean a second run.
+        self.ran.begin(a.session)?;
         let seed = play::seed(a.session, a.anchor, play::fresh()?);
         let played = tokio::task::block_in_place(|| play::play_job(held, &seed, &play::LIMITS));
         let message = ResultMessage {
@@ -219,12 +329,6 @@ impl JobExecutor {
             archive_hash: played.archive_hash(),
         };
         let signature = self.machine.key().sign_message(&message.encode())?;
-        // Held until the contract's minimum anchor age, by block time.
-        let provider = &sub.providers[0];
-        let anchor_time = provider.block(BlockTag::Number(a.block)).await?.timestamp;
-        while provider.block(BlockTag::Latest).await?.timestamp < anchor_time + RESULT_MIN_AGE_S {
-            sleep(500).await;
-        }
         let rx = self.batcher.queue(
             Entry::Result(Results::ResultItem {
                 session: a.session,
@@ -241,9 +345,19 @@ impl JobExecutor {
         if let Err(e) = Self::landed(rx).await {
             // A send that failed but landed, resent and skipped "already
             // resolved": only the bound key's result is ever accepted, so an
-            // accepted result is ours, and its archive still goes up.
-            if view.result(a.session).await?.is_none() || view.bound_key(a.session).await? != a.key
-            {
+            // accepted result is ours, and its archive still goes up. Asked
+            // as included, since finality is twenty minutes behind it.
+            let mut ours = false;
+            for _ in 0..LANDED_LOOKS * 5 {
+                if let Ok(true) = view.result_included(a.session).await
+                    && let Ok((key, _)) = view.anchor_included(a.session).await
+                {
+                    ours = key == a.key;
+                    break;
+                }
+                sleep(RETRY_MS).await;
+            }
+            if !ours {
                 return Err(e);
             }
         }

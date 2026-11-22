@@ -58,37 +58,212 @@ pub struct OnChainResult {
     pub archive_hash: B256,
 }
 
+/// The first provider to answer `$read`: one out of allowance or down never
+/// stops what any one may answer (TRUST.md#how-the-enclave-talks-to-the-chain,
+/// "Retries happen in the enclave, across the allowlisted providers").
+macro_rules! first_answer {
+    ($providers:expr, $p:ident => $read:expr) => {{
+        let mut last = anyhow::anyhow!("no provider");
+        let mut answer = None;
+        for $p in $providers.iter() {
+            match $read {
+                Ok(v) => {
+                    answer = Some(v);
+                    break;
+                }
+                Err(e) => last = e.into(),
+            }
+        }
+        answer.ok_or(last)
+    }};
+}
+pub(crate) use first_answer;
+
+/// The highest `$read` two providers have both reached: a stuck or lagging
+/// one never holds it back, and one alone never moves it. The first two
+/// decide while they're within `$spread`; past that, every one is asked.
+macro_rules! reached_by_two {
+    ($providers:expr, $spread:expr, $p:ident => $read:expr) => {{
+        let mut answers: Vec<u64> = Vec::new();
+        let mut last = anyhow::anyhow!("no two providers answered");
+        for $p in $providers.iter() {
+            match $read {
+                Ok(v) => answers.push(v),
+                Err(e) => last = e.into(),
+            }
+            if answers.len() == 2 && answers[0].abs_diff(answers[1]) <= $spread {
+                break;
+            }
+        }
+        reached(answers, $providers.len()).ok_or(last)
+    }};
+}
+
+/// The second highest, or the one's when one is configured (locally).
+fn reached(mut answers: Vec<u64>, configured: usize) -> Option<u64> {
+    if configured == 1 {
+        return answers.first().copied();
+    }
+    answers.sort_unstable_by(|a, b| b.cmp(a));
+    answers.get(1).copied()
+}
+
+/// How far two providers' heads may sit apart before the rest are asked.
+const HEAD_SPREAD_S: u64 = 15;
+/// And their finalized blocks: about three minutes of blocks.
+const FINAL_SPREAD_BLOCKS: u64 = 900;
+const FINAL_SPREAD_S: u64 = 180;
+
+/// A provider's client. Short timeouts: one that hangs is left for the next.
+pub fn client(url: &str) -> Client<Http> {
+    Client::new(Http::with_timeout(url, std::time::Duration::from_secs(10)))
+}
+
+/// Those of `urls` serving the binding's chain, in their order: the runner
+/// acts on a provider only once it does. Never one left of several, which
+/// would answer for both from then on.
+pub async fn serving(urls: &[String], chain_id: u64) -> anyhow::Result<Vec<String>> {
+    let mut serving = Vec::new();
+    for url in urls {
+        if client(url).chain_id().await.ok() == Some(chain_id) {
+            serving.push(url.clone());
+        }
+    }
+    anyhow::ensure!(
+        !serving.is_empty() && serving.len() >= urls.len().min(2),
+        "fewer than two allowlisted providers serve chain {chain_id}"
+    );
+    Ok(serving)
+}
+
+/// The newest block time two providers have reached.
+pub async fn head_time(providers: &[Client<Http>]) -> anyhow::Result<u64> {
+    reached_by_two!(providers, HEAD_SPREAD_S, p => p.block(BlockTag::Latest).await.map(|b| b.timestamp))
+}
+
 /// The allowlisted providers. Locally both are Anvil; in an image they're
 /// pinned hostnames, each checked to serve the binding's chain id.
 pub struct TwoProviders {
     pub providers: Vec<Client<Http>>,
     pub results: Address,
+    /// The highest finalized block this view has seen: finality never goes
+    /// back, so a provider a step behind never looks like a rollback.
+    finalized: std::sync::atomic::AtomicU64,
 }
 
 impl TwoProviders {
-    pub async fn connect(urls: &[String], chain_id: u64, results: Address) -> anyhow::Result<Self> {
-        let mut providers = Vec::new();
-        for url in urls {
-            let c = Client::new(Http::new(url.clone()));
-            // A provider counts only once it serves the binding's chain.
-            if c.chain_id().await.ok() == Some(chain_id) {
-                providers.push(c);
-            }
+    pub fn new(providers: Vec<Client<Http>>, results: Address) -> Self {
+        Self {
+            providers,
+            results,
+            finalized: Default::default(),
         }
-        anyhow::ensure!(
-            !providers.is_empty(),
-            "no allowlisted provider serves chain {chain_id}"
-        );
-        Ok(Self { providers, results })
     }
 
-    /// The two answers that must agree (one provider answers twice when only
-    /// one is configured, as locally).
-    fn pair(&self) -> (&Client<Http>, &Client<Http>) {
-        (
-            &self.providers[0],
-            self.providers.get(1).unwrap_or(&self.providers[0]),
-        )
+    pub async fn connect(urls: &[String], chain_id: u64, results: Address) -> anyhow::Result<Self> {
+        let urls = serving(urls, chain_id).await?;
+        Ok(Self::new(urls.iter().map(|u| client(u)).collect(), results))
+    }
+
+    /// A session's binding as included, by two providers: its key and the
+    /// anchoring block's time.
+    pub async fn anchor_included(&self, session: B256) -> anyhow::Result<(Address, u64)> {
+        let call = Results::anchorsCall(session);
+        let mut seen: Vec<(Address, u64)> = Vec::new();
+        let mut last = anyhow::anyhow!("the providers disagree on the anchor yet");
+        for p in &self.providers {
+            let read = p.call_typed(self.results, &call, BlockTag::Latest).await;
+            match read.map(|r| (r.key, r.time.to::<u64>())) {
+                // A binding two see is one: an answer of none may be behind.
+                Ok(at) if at.0 != Address::ZERO && seen.contains(&at) => return Ok(at),
+                Ok(at) => seen.push(at),
+                Err(e) => last = e,
+            }
+        }
+        match seen[..] {
+            [only] if self.providers.len() == 1 => Ok(only),
+            _ if seen.iter().filter(|at| at.0 == Address::ZERO).count() >= 2 => {
+                Ok((Address::ZERO, 0))
+            }
+            _ => Err(last),
+        }
+    }
+
+    /// Whether a session's result is accepted, as included, by two.
+    pub async fn result_included(&self, session: B256) -> anyhow::Result<bool> {
+        let call = Results::resultsCall(session);
+        let yes = reached_by_two!(self.providers, 0, p => p
+            .call_typed(self.results, &call, BlockTag::Latest)
+            .await
+            .map(|r| u64::from(r.accepted)))?;
+        Ok(yes == 1)
+    }
+
+    /// A finalized anchor's block time, which the minimum age runs from.
+    pub async fn anchor_time(&self, session: B256) -> anyhow::Result<u64> {
+        let a = self.agreed(&Results::anchorsCall(session)).await?;
+        anyhow::ensure!(a.key != Address::ZERO, "no final anchor yet");
+        Ok(a.time.to::<u64>())
+    }
+
+    /// The hash and block of an anchor whose batch's receipt was lost. The
+    /// contract keeps a commitment to both, which two providers give, so a
+    /// block any provider offers is proven by it.
+    pub async fn lost_anchor(
+        &self,
+        session: B256,
+        time: u64,
+        spec_hash: B256,
+    ) -> anyhow::Result<(B256, u64)> {
+        let call = Results::anchorCommitCall(session);
+        // Any two alike, so a stuck first hides nothing.
+        let mut answers: Vec<B256> = Vec::new();
+        for p in &self.providers {
+            if let Ok(c) = p.call_typed(self.results, &call, BlockTag::Latest).await
+                && c != B256::ZERO
+            {
+                answers.push(c);
+                if self.providers.len() == 1 || answers.iter().filter(|x| **x == c).count() == 2 {
+                    break;
+                }
+            }
+        }
+        let a = answers
+            .last()
+            .copied()
+            .filter(|c| {
+                self.providers.len() == 1 || answers.iter().filter(|x| *x == c).count() >= 2
+            })
+            .ok_or_else(|| anyhow::anyhow!("no commitment agreed yet"))?;
+        let head = reached_by_two!(self.providers, FINAL_SPREAD_BLOCKS, p => p
+            .block(BlockTag::Latest)
+            .await
+            .map(|b| b.number))?;
+        let mut lo = head.saturating_sub(700_000);
+        let mut hi = head;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let block = first_answer!(self.providers, p => p.block(BlockTag::Number(mid)).await)?;
+            if block.timestamp >= time {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        // Several blocks share a second.
+        while lo > 0 && lo <= head {
+            let block = first_answer!(self.providers, p => p.block(BlockTag::Number(lo)).await)?;
+            if block.timestamp != time {
+                break;
+            }
+            let before =
+                first_answer!(self.providers, p => p.block(BlockTag::Number(lo - 1)).await)?;
+            if commitment(before.hash, before.number, spec_hash) == a {
+                return Ok((before.hash, before.number));
+            }
+            lo += 1;
+        }
+        anyhow::bail!("no block matches the anchor's commitment")
     }
 
     async fn agreed<C>(&self, call: &C) -> anyhow::Result<C::Return>
@@ -100,23 +275,15 @@ impl TwoProviders {
         self.agreed_at(call, block).await
     }
 
-    /// The finalized block, the lower of the first two providers' that
-    /// answer (or one's, when only one is configured).
+    /// The highest finalized block two providers have reached, never less
+    /// than this view has already seen.
     async fn finalized_block(&self) -> anyhow::Result<u64> {
-        let mut seen = Vec::with_capacity(2);
-        let mut last_error = None;
-        for p in &self.providers {
-            match p.block(BlockTag::SETTLED).await {
-                Ok(b) => seen.push(b.number),
-                Err(e) => last_error = Some(e),
-            }
-            if seen.len() == 2 {
-                break;
-            }
-        }
-        seen.into_iter()
-            .min()
-            .ok_or_else(|| last_error.unwrap_or_else(|| anyhow::anyhow!("no provider answered")))
+        use std::sync::atomic::Ordering::Relaxed;
+        let now = reached_by_two!(self.providers, FINAL_SPREAD_BLOCKS, p => p
+            .block(BlockTag::SETTLED)
+            .await
+            .map(|b| b.number))?;
+        Ok(self.finalized.fetch_max(now, Relaxed).max(now))
     }
 
     /// A getter two providers agree on, at `block`: the first two that
@@ -244,29 +411,20 @@ impl ChainView for TwoProviders {
 
     async fn key_active(&self, key: Address) -> anyhow::Result<bool> {
         // Approval acts on inclusion: the key needs nothing final to start.
-        let (a, b) = self.pair();
-        let x = a
-            .call_typed(
-                self.results,
-                &Results::keyActiveCall { key },
-                BlockTag::Latest,
-            )
-            .await?;
-        let y = b
-            .call_typed(
-                self.results,
-                &Results::keyActiveCall { key },
-                BlockTag::Latest,
-            )
-            .await?;
-        Ok(x && y)
+        let call = Results::keyActiveCall { key };
+        let yes = reached_by_two!(self.providers, 0, p => p
+            .call_typed(self.results, &call, BlockTag::Latest)
+            .await
+            .map(u64::from))?;
+        Ok(yes == 1)
     }
 
     async fn balance(&self, address: Address) -> anyhow::Result<U256> {
-        let (a, b) = self.pair();
-        Ok(a.balance(address, BlockTag::Latest)
-            .await?
-            .min(b.balance(address, BlockTag::Latest).await?))
+        let reached = reached_by_two!(self.providers, 0, p => p
+            .balance(address, BlockTag::Latest)
+            .await
+            .map(|b| u64::try_from(b).unwrap_or(u64::MAX)))?;
+        Ok(U256::from(reached))
     }
 
     async fn post(&self, number: u64) -> anyhow::Result<(B256, u64)> {
@@ -294,17 +452,11 @@ impl ChainView for TwoProviders {
     }
 
     async fn head_times(&self) -> anyhow::Result<(u64, u64)> {
-        let (a, b) = self.pair();
-        let latest = a
-            .block(BlockTag::Latest)
-            .await?
-            .timestamp
-            .min(b.block(BlockTag::Latest).await?.timestamp);
-        let finalized = a
+        let latest = head_time(&self.providers).await?;
+        let finalized = reached_by_two!(self.providers, FINAL_SPREAD_S, p => p
             .block(BlockTag::SETTLED)
-            .await?
-            .timestamp
-            .min(b.block(BlockTag::SETTLED).await?.timestamp);
+            .await
+            .map(|b| b.timestamp))?;
         Ok((latest, finalized))
     }
 
@@ -346,6 +498,13 @@ impl ChainView for TwoProviders {
     async fn post_count(&self) -> anyhow::Result<u64> {
         self.agreed(&Results::postCountCall {}).await
     }
+}
+
+/// What the contract keeps of an anchor: `keccak256(abi.encode(hash, block,
+/// spec hash))`.
+fn commitment(hash: B256, block: u64, spec_hash: B256) -> B256 {
+    use alloy_sol_types::SolValue;
+    botstadia_chain::keccak256((hash, U256::from(block), spec_hash).abi_encode())
 }
 
 /// A chain in memory, for tests (feature `testing`).

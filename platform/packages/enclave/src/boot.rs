@@ -22,6 +22,9 @@ use crate::chain_view::ChainView;
 use crate::client::{Machine, Transport};
 use crate::submit::Submitter;
 
+/// Polls between sends of an approval not yet seen active.
+const APPROVE_AGAIN_POLLS: usize = 30;
+
 /// How long to wait, and how often to look.
 pub struct Pace<F> {
     pub pause: F,
@@ -67,35 +70,63 @@ pub async fn bundle_key<T: Transport, Fut: std::future::Future<Output = ()>>(
     pace: &Pace<impl Fn() -> Fut + Copy>,
     on_wait: impl Fn(&str),
 ) -> anyhow::Result<BundleKey> {
+    // Nothing here ends on one failed read: the launch never restarts a
+    // container that exits.
     for _ in 0..pace.polls {
-        match bundle_key::plan(view, &holders).await? {
-            Plan::Mint(n) => {
-                if let Some(key) = bundle_key::mint(machine, n).await? {
-                    bundle_key::report_holding(machine, &key).await?;
+        match bundle_key::plan(view, &holders).await {
+            Ok(Plan::Mint(n)) => match bundle_key::mint(machine, n).await {
+                Ok(Some(key)) => {
+                    report(machine, &key, pace).await?;
                     return Ok(key);
                 }
-            }
-            Plan::Fetch(n, list) => {
+                Ok(None) => {}
+                Err(e) => on_wait(&format!("mint: {e:#}")),
+            },
+            Ok(Plan::Fetch(n, list)) => {
                 for h in &list {
+                    // Ten minutes each: a holder that died is still listed,
+                    // and an older one checking us through a provider that
+                    // hangs takes minutes. A shorter wait throws away its
+                    // late reply, every time.
+                    let polls = pace.polls.min(600);
                     match bundle_key::fetch(
-                        machine, view, attester, ctx, h, n, now_s, pace.pause, pace.polls,
+                        machine, view, attester, ctx, h, n, now_s, pace.pause, polls,
                     )
                     .await
                     {
                         Ok(key) => {
-                            bundle_key::report_holding(machine, &key).await?;
+                            report(machine, &key, pace).await?;
                             return Ok(key);
                         }
                         Err(e) => on_wait(&format!("fetch from {} failed: {e:#}", h.address)),
                     }
                 }
             }
-            Plan::Wait(why) => on_wait(&why),
+            Ok(Plan::Wait(why)) => on_wait(&why),
+            Err(e) => on_wait(&format!("the plan: {e:#}")),
         }
         (pace.pause)().await;
-        holders = machine.call::<FleetHolders, _, _>(Empty {}).await?;
+        match machine.call::<FleetHolders, _, _>(Empty {}).await {
+            Ok(listed) => holders = listed,
+            Err(e) => on_wait(&format!("the holders: {e:#}")),
+        }
     }
     anyhow::bail!("no BundleKey after {} tries", pace.polls)
+}
+
+/// Tell the api, until it hears.
+async fn report<T: Transport, Fut: std::future::Future<Output = ()>>(
+    machine: &Machine<T>,
+    key: &BundleKey,
+    pace: &Pace<impl Fn() -> Fut + Copy>,
+) -> anyhow::Result<()> {
+    let mut tries = 0;
+    while let Err(e) = bundle_key::report_holding(machine, key).await {
+        tries += 1;
+        anyhow::ensure!(tries < pace.polls, "never reported holding: {e:#}");
+        (pace.pause)().await;
+    }
+    Ok(())
 }
 
 /// Prove and approve the key; returns once it's active on-chain.
@@ -118,14 +149,39 @@ pub async fn approve<T: Transport, Fut: std::future::Future<Output = ()>>(
         results: ctx.results.0.0,
         instruction: key.instruction,
     };
-    let token = attester.token(&[binding.nonce()], now_s)?;
-    let _: Empty = machine
-        .call::<FleetBootToken, _, _>(BootToken { token })
-        .await?;
+    let mut tries = 0;
+    let token = loop {
+        match attester.token(&[binding.nonce()], now_s) {
+            Ok(token) => break token,
+            Err(e) => {
+                tries += 1;
+                anyhow::ensure!(tries < pace.polls, "no boot token: {e:#}");
+                (pace.pause)().await;
+            }
+        }
+    };
+    let mut tries = 0;
+    while let Err(e) = machine
+        .call::<FleetBootToken, _, _>(BootToken {
+            token: token.clone(),
+        })
+        .await
+    {
+        tries += 1;
+        anyhow::ensure!(
+            tries < pace.polls,
+            "the boot token never reached the api: {e:#}"
+        );
+        (pace.pause)().await;
+    }
     let mut proof = None;
     for _ in 0..pace.polls {
-        let p: BootProof = machine.call::<FleetBootProof, _, _>(Empty {}).await?;
-        if let (Some(j), Some(s)) = (p.journal, p.seal) {
+        if let Ok(BootProof {
+            journal: Some(j),
+            seal: Some(s),
+            ..
+        }) = machine.call::<FleetBootProof, _, _>(Empty {}).await
+        {
             proof = Some((
                 hex::decode(j.trim_start_matches("0x"))?,
                 hex::decode(s.trim_start_matches("0x"))?,
@@ -136,22 +192,30 @@ pub async fn approve<T: Transport, Fut: std::future::Future<Output = ()>>(
     }
     let (journal, seal) =
         proof.ok_or_else(|| anyhow::anyhow!("the prover never published a proof"))?;
+    // Seen once is arrived: asking again could meet a backend a block behind.
+    let mut funded = false;
     for _ in 0..pace.polls {
-        if !view.balance(address).await?.is_zero() {
+        if matches!(view.balance(address).await, Ok(float) if !float.is_zero()) {
+            funded = true;
             break;
         }
         (pace.pause)().await;
     }
-    anyhow::ensure!(
-        !view.balance(address).await?.is_zero(),
-        "the float never arrived"
-    );
-    submitter.approve_key(&journal, &seal).await?;
-    for _ in 0..pace.polls {
-        if view.key_active(address).await? {
+    anyhow::ensure!(funded, "the float never arrived");
+    // The chain says whether it landed, never the send's answer: sent again
+    // until the key is active, and a send that had landed only fails to
+    // estimate ("key known").
+    let mut last = None;
+    for i in 0..pace.polls {
+        if i % APPROVE_AGAIN_POLLS == 0
+            && let Err(e) = submitter.approve_key(&journal, &seal).await
+        {
+            last = Some(e);
+        }
+        if matches!(view.key_active(address).await, Ok(true)) {
             return Ok(());
         }
         (pace.pause)().await;
     }
-    anyhow::bail!("the key isn't active on-chain after its approval")
+    anyhow::bail!("the key isn't active on-chain after its approval (last send: {last:?})")
 }

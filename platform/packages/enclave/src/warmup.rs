@@ -132,7 +132,8 @@ pub async fn prepare<T: Transport>(
     match posted {
         Ok(t) if t + crate::constants::ARENA_WAIT_S <= now => {}
         Ok(_) => return Ok(Err("the arena version was posted too recently".into())),
-        Err(e) => return Ok(Err(format!("the arena version's post: {e:#}"))),
+        // No verdict on the bot: given back, and tried again.
+        Err(e) => return Err(e.context("the arena version's post")),
     }
     let arena = cdn.arena(&payload.arena_id, &arena_digest)?;
     let budget = botstadia_host::budget::current();

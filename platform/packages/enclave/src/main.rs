@@ -11,11 +11,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use botstadia_chain::rpc::{BlockTag, Client, Http};
+use botstadia_chain::rpc::{Client, Http};
 use botstadia_enclave::batch::{BatchLimits, Batcher};
 use botstadia_enclave::boot::{self, Pace};
 use botstadia_enclave::bundle_key::{self, Context, Holding};
-use botstadia_enclave::chain_view::TwoProviders;
+use botstadia_enclave::chain_view::{TwoProviders, client, head_time};
 use botstadia_enclave::client::Http as ApiHttp;
 use botstadia_enclave::executor::{JobExecutor, now_ms};
 use botstadia_enclave::runner::Runner;
@@ -50,6 +50,11 @@ fn flat_cpu(core: usize) {
             }
         });
 }
+
+/// How often a holder looks for handover messages.
+const SERVE_MS: u64 = 1_000;
+/// How often a holder tries again the providers that didn't answer.
+const RECONNECT_MS: u64 = 600_000;
 
 fn log(line: &str) {
     eprintln!("runner: {line}");
@@ -128,21 +133,24 @@ async fn run() -> anyhow::Result<()> {
         results: s.results,
         project: s.project.clone(),
     };
-    let head = Client::new(Http::new(s.rpc_urls[0].clone()));
-    // Tokens and every timing rule run on block time.
-    let block_time = || {
-        let head = &head;
-        async move {
-            head.block(BlockTag::Latest)
-                .await
-                .map(|b| b.timestamp)
-                .unwrap_or(0)
+    let clients =
+        |urls: &[String]| -> Vec<Client<Http>> { urls.iter().map(|u| client(u)).collect() };
+    // Tokens and every timing rule run on block time, from whichever
+    // provider answers: before registering, the keyless ones.
+    let now_s = head_time(&clients(&s.rpc_urls)).await.unwrap_or(0);
+    let attester = attester();
+    let mut tries = 0;
+    let (mut machine, holders) = loop {
+        match boot::register(ApiHttp::new(s.api_url.clone()), &attester, &ctx, now_s).await {
+            Ok(registered) => break registered,
+            Err(e) => {
+                tries += 1;
+                anyhow::ensure!(tries < 360, "never registered in an hour: {e:#}");
+                log(&format!("registering failed, trying again: {e:#}"));
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
         }
     };
-    let now_s = block_time().await;
-    let attester = attester();
-    let (mut machine, holders) =
-        boot::register(ApiHttp::new(s.api_url.clone()), &attester, &ctx, now_s).await?;
     // The way back if the api's nonce and ours ever part: register again on
     // a fresh token, issued at the newest block time we've seen.
     let seen = Arc::new(std::sync::atomic::AtomicU64::new(now_s));
@@ -169,23 +177,47 @@ async fn run() -> anyhow::Result<()> {
     if let Some(chain) = s.keyed_chain {
         use botstadia_shared::api::Empty;
         use botstadia_shared::platform::{FleetRpcKeys, RpcKeys};
-        let keys: RpcKeys = machine.call::<FleetRpcKeys, _, _>(Empty {}).await?;
+        let mut tries = 0;
+        let keys: RpcKeys = loop {
+            match machine.call::<FleetRpcKeys, _, _>(Empty {}).await {
+                Ok(keys) => break keys,
+                Err(e) => {
+                    tries += 1;
+                    anyhow::ensure!(tries < 360, "no RPC keys in an hour: {e:#}");
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            }
+        };
         s.rpc_urls = botstadia_enclave::constants::rpc_urls(chain, &keys.keys)?;
     }
-    let view = TwoProviders::connect(&s.rpc_urls, s.chain_id, s.results).await?;
+    let mut tries = 0;
+    let mut view = loop {
+        match TwoProviders::connect(&s.rpc_urls, s.chain_id, s.results).await {
+            Ok(view) => break view,
+            Err(e) => {
+                tries += 1;
+                anyhow::ensure!(tries < 360, "no two providers in an hour: {e:#}");
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        }
+    };
+    let heads = clients(&s.rpc_urls);
     // Block time moves on while the BundleKey is fetched (a handover can take
     // a while), and a peer's token is issued at its own newest block time: so
-    // `seen` follows the chain from here, not just from the main loop.
+    // `seen` follows the chain closely until this machine works, and from
+    // then on only often enough to register again by.
+    let working = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
-        let seen = seen.clone();
-        let url = s.rpc_urls[0].clone();
+        let (seen, working) = (seen.clone(), working.clone());
+        let heads = clients(&s.rpc_urls);
         tokio::spawn(async move {
-            let head = Client::new(Http::new(url));
             loop {
-                if let Ok(b) = head.block(BlockTag::Latest).await {
-                    seen.fetch_max(b.timestamp, std::sync::atomic::Ordering::Relaxed);
+                if let Ok(time) = head_time(&heads).await {
+                    seen.fetch_max(time, std::sync::atomic::Ordering::Relaxed);
                 }
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                let working = working.load(std::sync::atomic::Ordering::Relaxed);
+                let every = if working { 15_000 } else { 500 };
+                tokio::time::sleep(Duration::from_millis(every)).await;
             }
         });
     }
@@ -209,11 +241,7 @@ async fn run() -> anyhow::Result<()> {
         key.instruction
     ));
     let submitter = ChainSubmitter {
-        providers: s
-            .rpc_urls
-            .iter()
-            .map(|u| Client::new(Http::new(u.clone())))
-            .collect(),
+        providers: clients(&s.rpc_urls),
         key: machine.key().clone(),
         chain_id: s.chain_id,
         results: s.results,
@@ -227,10 +255,11 @@ async fn run() -> anyhow::Result<()> {
         &submitter,
         &ctx,
         &key,
-        block_time().await,
+        head_time(&heads).await.unwrap_or(0),
         &pace,
     )
     .await?;
+    working.store(true, std::sync::atomic::Ordering::Relaxed);
     log("approved and funded: taking work");
 
     let machine = Arc::new(machine);
@@ -258,6 +287,7 @@ async fn run() -> anyhow::Result<()> {
         },
     ));
     let executor = JobExecutor {
+        ran: Default::default(),
         machine: machine.clone(),
         settings: s.clone(),
         bundle_key: key.clone(),
@@ -303,6 +333,8 @@ async fn run() -> anyhow::Result<()> {
     let mut checked_maintenance = 0u64;
     let mut holding = Holding::default();
     let mut draining = false;
+    let (mut served, mut reconnected) = (0u64, now_ms());
+    let mut flushed = 0u64;
     let mut stop = Box::pin(async {
         let term = async {
             #[cfg(unix)]
@@ -318,7 +350,6 @@ async fn run() -> anyhow::Result<()> {
     });
     loop {
         let now = now_ms();
-        seen.fetch_max(block_time().await, std::sync::atomic::Ordering::Relaxed);
         if on_gcp && now >= checked_maintenance + 30_000 {
             checked_maintenance = now;
             let noticed = tokio::task::spawn_blocking(botstadia_enclave::gce::maintenance_noticed)
@@ -349,37 +380,59 @@ async fn run() -> anyhow::Result<()> {
                 if let Some(id) = &step.claimed {
                     log(&format!("claimed {id}"));
                 }
-                if anchors.due(now, step.boundary)
-                    && let Err(e) = anchors
-                        .flush(&submitter, now, || {
-                            tokio::time::sleep(Duration::from_millis(250))
-                        })
-                        .await
-                {
-                    log(&format!("anchor batch failed, retrying next window: {e:#}"));
-                }
-                if batcher.due(now, step.boundary)
-                    && let Err(e) = batcher
-                        .flush(&submitter, now, || {
-                            tokio::time::sleep(Duration::from_millis(250))
-                        })
-                        .await
-                {
-                    log(&format!("batch failed, retrying next window: {e:#}"));
-                }
             }
             Err(e) => log(&format!("step failed: {e:#}")),
         }
-        if let Err(e) = bundle_key::serve(
-            &machine,
-            &view,
-            &attester,
-            &ctx,
-            &key,
-            &mut holding,
-            block_time().await,
-        )
-        .await
+        // The boundary is the clock's, and both batchers are asked whatever
+        // the step came to: the api is never in a result's path, so one that
+        // fails or hangs holds no batch (TRUST.md#submitting-results).
+        let window = now / s.window_ms.max(1);
+        let boundary = window != flushed;
+        flushed = window;
+        if anchors.due(now, boundary)
+            && let Err(e) = anchors
+                .flush(&submitter, now, || {
+                    tokio::time::sleep(Duration::from_millis(250))
+                })
+                .await
+        {
+            log(&format!("anchor batch failed, retrying next window: {e:#}"));
+        }
+        if batcher.due(now, boundary)
+            && let Err(e) = batcher
+                .flush(&submitter, now, || {
+                    tokio::time::sleep(Duration::from_millis(250))
+                })
+                .await
+        {
+            log(&format!("batch failed, retrying next window: {e:#}"));
+        }
+        // A provider dropped when it last connected comes back, so a holder
+        // can hand over whichever two answer by then.
+        if now >= reconnected + RECONNECT_MS {
+            reconnected = now;
+            if view.providers.len() < s.rpc_urls.len()
+                && let Ok(again) = TwoProviders::connect(&s.rpc_urls, s.chain_id, s.results).await
+                // As many, perhaps others: one recovered for one gone down.
+                && again.providers.len() >= view.providers.len()
+            {
+                view = again;
+            }
+        }
+        if now >= served + SERVE_MS
+            && let Err(e) = {
+                served = now;
+                bundle_key::serve(
+                    &machine,
+                    &view,
+                    &attester,
+                    &ctx,
+                    &key,
+                    &mut holding,
+                    async || head_time(&heads).await.unwrap_or(0),
+                )
+                .await
+            }
         {
             log(&format!("handover failed: {e:#}"));
         }

@@ -7,7 +7,6 @@
 use alloy_sol_types::SolCall;
 use botstadia_chain::abi::Results;
 use botstadia_chain::events::{Contracts, Event, decode};
-use botstadia_chain::rpc::BlockTag;
 use botstadia_chain::{Address, B256, Bytes};
 
 use crate::chain_view::ChainView;
@@ -38,8 +37,8 @@ impl Anchored {
 
 /// Whether a block far enough past `close` has been included.
 pub async fn past_close(submitter: &ChainSubmitter, close: u64) -> anyhow::Result<bool> {
-    let head = submitter.providers[0].block(BlockTag::Latest).await?;
-    Ok(head.timestamp >= close + ANCHOR_MARGIN_S)
+    let head = crate::chain_view::head_time(&submitter.providers).await?;
+    Ok(head >= close + ANCHOR_MARGIN_S)
 }
 
 /// A held session's anchor item. A final carries its week's field entry, so
@@ -58,16 +57,33 @@ pub fn item(h: &Held) -> Results::AnchorItem {
     }
 }
 
+/// The sessions this boot has begun to run. An enclave never restarts a
+/// bound session (TRUST.md#every-session-one-flow), and a key lives one
+/// boot: so whatever is offered twice, or recovered twice from the chain,
+/// draws one seed.
+#[derive(Default)]
+pub struct RunOnce(std::sync::Mutex<std::collections::HashSet<B256>>);
+
+impl RunOnce {
+    pub fn begin(&self, session: B256) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.0.lock().expect("sessions run").insert(session),
+            "this boot has already begun that session: never twice"
+        );
+        Ok(())
+    }
+}
+
 /// Whether a session anchored at `now` could still have its result land
 /// before its deadline (TRUST.md: an enclave checks the current finality
 /// lag before it anchors). The session runs once its anchor is final (the
-/// lag) and takes at most the longest session the arena allows; its result
-/// goes in no sooner than the minimum age after the anchor, which runs
-/// alongside; and the anchor's and the result's batches each wait up to a
+/// lag) and past the minimum age after it, which runs alongside and is
+/// waited before play, then takes at most the longest session the arena
+/// allows; and the anchor's and the result's batches each wait up to a
 /// window. The contract judges the deadline when the result is included, so
 /// the result's own finality isn't needed.
 pub fn room_to_anchor(now: u64, close: u64, lag_s: u64, longest_s: u64, window_s: u64) -> bool {
-    let needed = (lag_s + longest_s).max(crate::executor::RESULT_MIN_AGE_S) + 2 * window_s;
+    let needed = lag_s.max(crate::executor::RESULT_MIN_AGE_S) + longest_s + 2 * window_s;
     now.saturating_add(needed) <= close + crate::constants::RESULT_DEADLINE_S
 }
 
@@ -114,18 +130,42 @@ pub async fn wait_final<F: std::future::Future<Output = ()>>(
     pause: impl Fn() -> F,
     polls: usize,
 ) -> anyhow::Result<()> {
+    let mut last = None;
     for _ in 0..polls {
-        if view.finalized().await? >= block {
-            return Ok(());
+        match view.finalized().await {
+            Ok(n) if n >= block => return Ok(()),
+            Ok(_) => {}
+            // Bound by then: a provider's bad minute is waited out.
+            Err(e) => last = Some(e),
         }
         pause().await;
     }
-    anyhow::bail!("block {block} isn't final yet")
+    anyhow::bail!("block {block} isn't final yet (last error: {last:?})")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_boot_runs_a_session_once_however_many_jobs_hold_it() {
+        let ran = std::sync::Arc::new(RunOnce::default());
+        let session = B256::repeat_byte(7);
+        let jobs: Vec<_> = (0..2)
+            .map(|_| {
+                let ran = ran.clone();
+                std::thread::spawn(move || ran.begin(session).is_ok())
+            })
+            .collect();
+        let began = jobs
+            .into_iter()
+            .map(|j| j.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(began, 1, "two jobs, one run");
+        assert!(ran.begin(session).is_err(), "nor after the first has ended");
+        assert!(ran.begin(B256::repeat_byte(8)).is_ok());
+    }
 
     #[test]
     fn an_anchor_is_final_with_its_transactions_block() {
@@ -144,9 +184,9 @@ mod tests {
         let deadline = crate::constants::RESULT_DEADLINE_S;
         assert!(room_to_anchor(close, close, 60, 600, 180));
         assert!(!room_to_anchor(close, close, deadline, 600, 180));
-        // The result's minimum age runs alongside the anchor's finality wait.
+        // The minimum age runs alongside the finality wait, then it plays.
         let age = crate::executor::RESULT_MIN_AGE_S;
-        let late = close + deadline - age - 2 * 180;
+        let late = close + deadline - age - age / 2 - 2 * 180;
         assert!(room_to_anchor(late, close, age / 2, age / 2, 180));
         assert!(!room_to_anchor(late + 1, close, age / 2, age / 2, 180));
         assert!(!room_to_anchor(close + deadline, close, 0, 0, 0));

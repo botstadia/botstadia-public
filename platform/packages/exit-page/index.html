@@ -47,6 +47,7 @@
     <label for="bundler">Bundler (blank: this page's public default)</label>
     <input id="bundler" spellcheck="false" placeholder="">
   </details>
+  <label style="display:flex;gap:8px;align-items:center"><input id="skip" type="checkbox" style="width:auto"> Withdraw without claiming: skips the scan for claims, which can be slow or fail on a limited RPC</label>
   <button id="check">Check my wallet</button>
 
   <div id="status" class="box" hidden></div>
@@ -60,14 +61,13 @@
 
   <div id="withdraw-box" class="box" hidden>
     <h2>Claim and withdraw</h2>
-    <p>One step claims everything claimable and sends USDC to an address you choose, on Base. Gas is paid in USDC from the wallet.</p>
+    <p>One step claims what's claimable, sessions and weeks (the 40 largest at a time), and sends USDC to an address you choose, on Base. Gas is paid in USDC from the wallet.</p>
     <label for="to">Send to (a Base address you control)</label>
     <input id="to" spellcheck="false" placeholder="0x…">
     <label for="amount">Amount in USDC (blank: everything but what the gas could take, which stays in the wallet)</label>
     <input id="amount" inputmode="decimal" placeholder="">
     <button id="withdraw">Claim and withdraw</button>
   </div>
-  <p style="margin-top:28px">Week-winner pools need their final's entry to claim, which this page doesn't fetch: claim those on the site, or with <span class="mono">claimWeeksFor</span> on the settlement contract.</p>
 </main>
 <script type="application/json" id="saved">"__BOTSTADIA_SAVE__"</script>
 <script type="module">
@@ -91,9 +91,12 @@ async function check() {
   say("Checking…");
   try {
     read_save($("save").value, $("key").value);
-    const w = JSON.parse(await inspect($("save").value, $("key").value, $("rpc").value.trim()));
+    const w = JSON.parse(await inspect($("save").value, $("key").value, $("rpc").value.trim(), $("skip").checked));
     let html = `Wallet <span class="mono">${text(w.wallet)}</span> on chain ${w.chain_id}<br>USDC: <strong>${usdc(w.usdc)}</strong>`;
-    if (w.claimable_total) html += `<br>Ready to claim: <strong>${usdc(w.claimable_total)}</strong>`;
+    // Nothing read isn't nothing owed: no zero where a read was missed.
+    if (w.claimable_total && !$("skip").checked && !(w.claim_missed && w.claimable_total === "0")) html += `<br>Ready to claim: <strong>${usdc(w.claimable_total)}</strong>`;
+    if (w.claimable_next && w.claimable_next !== w.claimable_total) html += `<br>The next step claims <strong>${usdc(w.claimable_next)}</strong> of it: run it again for the rest.`;
+    if (w.claim_missed) html += `<br><span class="warn">Not every claim was read (${text(w.claim_missed)}). You can still withdraw your USDC, and claim later.</span>`;
     if (w.key_is_owner === false) html += `<br><span class="warn">That recovery key is no longer an owner of this wallet.</span>`;
     say(html, w.key_is_owner === false ? "warn" : "");
     if (!w.deployed) {
@@ -115,11 +118,15 @@ $("deploy").onclick = async () => {
   catch (e) { say(text(e), "warn"); }
 };
 $("withdraw").onclick = async () => {
+  // One at a time: a second press would sign and send it again.
+  if ($("withdraw").disabled) return;
+  $("withdraw").disabled = true;
   say("Claiming and withdrawing…");
   try {
-    const r = JSON.parse(await withdraw($("save").value, $("key").value, $("to").value, $("amount").value, $("rpc").value.trim(), $("bundler").value.trim()));
-    say(`Done: claimed ${usdc(r.claimed)} and sent ${usdc(r.sent)} USDC in <span class="mono">${text(r.tx)}</span>.`, "ok");
+    const r = JSON.parse(await withdraw($("save").value, $("key").value, $("to").value, $("amount").value, $("rpc").value.trim(), $("bundler").value.trim(), $("skip").checked));
+    say(`Done: claimed ${usdc(r.claimed)} and sent ${usdc(r.sent)} USDC in <span class="mono">${text(r.tx)}</span>.${r.claim_missed ? `<br>Claims left for later: ${text(r.claim_missed)}` : ""}`, "ok");
   } catch (e) { say(text(e), "warn"); }
+  finally { $("withdraw").disabled = false; }
 };
 </script>
 </body>

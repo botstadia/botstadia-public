@@ -392,6 +392,8 @@ pub fn retirement_message(action: &str, bot_id: &str, request: &str) -> String {
 
 /// What a payout statement says (MONEY.md#how-a-builder-earns). One naming
 /// an address carries the eligibility attestation; one naming zero doesn't.
+/// `account` is the account's statement reference
+/// (`botstadia_chain::wallet::statement_ref`), published with it, never its id.
 pub fn statement_message(account: &str, number: u64, address: &str) -> String {
     let address = address.to_lowercase();
     if address == ZERO_ADDRESS {
@@ -403,11 +405,6 @@ pub fn statement_message(account: &str, number: u64, address: &str) -> String {
             "BotStadia payout statement {number}\naccount: {account}\naddress: {address}\nPay my bots' builder share to this address. I am 18 or older, I am not an excluded person, such as a US person or a sanctioned person, and I am not acting for one."
         )
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WalletBind {
-    pub address: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,6 +446,14 @@ pub struct RetireBot {
     pub bot_id: String,
 }
 
+/// A request with no proof, with the asking device's own random id (kept in
+/// its storage, never a cookie), which its daily limit counts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetireAsk {
+    pub bot_id: String,
+    pub device: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetireSigned {
     pub bot_id: String,
@@ -465,7 +470,6 @@ pub struct RetirementState {
     pub effective_at: u64,
 }
 
-endpoint!(WalletBindStart, Post, "/wallet/bind", Verified, WalletBind => BindState);
 endpoint!(
     /// `botstadia confirm-wallet` posts its signature here: it names the
     /// account and wallet itself, so no sign-in is needed.
@@ -482,13 +486,17 @@ endpoint!(
 endpoint!(RetireStopByAuthor, Post, "/bots/retire/author/stop", Public, RetireSigned => RetirementState);
 endpoint!(
     /// Anyone signed in may ask, with no proof; a person judges it.
-    RetireRequest, Post, "/bots/retire/request", Verified, RetireBot => RetirementState
+    RetireRequest, Post, "/bots/retire/request", Verified, RetireAsk => RetirementState
 );
 
 endpoint!(
     /// A retirement started by the account's wallet: its signature alone
     /// names the account, so no sign-in is needed.
     RetireByWallet, Post, "/bots/retire/wallet", Public, RetireSigned => RetirementState
+);
+endpoint!(
+    /// The wallet stops a sign-in's retirement or its own, by signature alone.
+    RetireStopByWallet, Post, "/bots/retire/wallet/stop", Public, RetireSigned => RetirementState
 );
 
 // --- account wallets (TRUST.md#account-wallets) ----------------------------------------
@@ -533,6 +541,10 @@ pub struct WalletSetup {
     pub labels: std::collections::BTreeMap<String, String>,
     /// The wallet's ERC-1271 signature over [`wallet_setup_message`].
     pub signature: String,
+    /// It's meant as the account's first wallet: refused if there's one, so
+    /// a page that didn't know can't start a rebind.
+    #[serde(default)]
+    pub first: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -561,6 +573,216 @@ pub struct WalletsMine {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletAddress {
     pub address: String,
+}
+
+/// Where one of a builder's bots stands (COMPETITION.md#warm-up,
+/// BOTS.md#bundles). A warm-up shows its status and nothing more.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotStage {
+    VerifyQueued,
+    #[default]
+    Verifying,
+    /// Never passed its first verification, so it isn't a bot.
+    Failed,
+    WarmUpQueued,
+    WarmUpRunning,
+    /// Waiting on BotStadia: nothing for the builder to do.
+    Waiting,
+    Rated,
+    Retired,
+}
+
+/// One bot's requests with no proof, as the person judging them reads them
+/// (MONEY.md#retiring-a-bot): one entry a bot.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetirementQueued {
+    /// The newest request listed: judging it covers the bot's up to it.
+    pub id: String,
+    pub bot_id: String,
+    pub bot_name: String,
+    pub arena_id: String,
+    pub builder: Option<String>,
+    pub builder_email: String,
+    /// When the bot's first request's wait ends: no grant before it.
+    pub judge_from: u64,
+    /// The newest first.
+    pub requests: Vec<RetirementRequested>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetirementRequested {
+    pub requester: Option<String>,
+    pub requester_email: String,
+    /// When the asking account was made.
+    pub requester_since: String,
+    pub started_at: u64,
+}
+
+/// Who started a retirement, which decides who may stop it
+/// (MONEY.md#retiring-a-bot).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetiredBy {
+    Signin,
+    Wallet,
+    Author,
+    Request,
+}
+
+impl RetiredBy {
+    /// Whether a sign-in or the account's wallet may stop it.
+    pub fn account_may_stop(self) -> bool {
+        matches!(self, Self::Signin | Self::Wallet)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retirement {
+    pub by: RetiredBy,
+    /// Unix ms. A bot in a running week's field also plays out that week.
+    pub effective_at: u64,
+    /// A request with no proof, once a person granted it.
+    pub granted: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountBot {
+    pub id: String,
+    pub name: String,
+    pub arena_id: String,
+    pub stage: BotStage,
+    /// Of a queued verification or warm-up.
+    pub queue_ahead: Option<u64>,
+    /// Why it failed verification: told to its builder only.
+    pub failure: Option<String>,
+    /// The rating's mean and uncertainty, in millionths.
+    pub mu: Option<i64>,
+    pub sigma: Option<i64>,
+    /// One that never has retires at once on sign-in.
+    pub played_bettable: bool,
+    pub awaiting_rekey: bool,
+    pub code_exposed: bool,
+    /// In a running week's field until its final's close (unix seconds).
+    pub in_week_until: Option<u64>,
+    pub retirements: Vec<Retirement>,
+    /// The field a statement signed now reaches it at (unix seconds): this
+    /// week's while that isn't set yet, else the next.
+    pub starts_at: Option<u64>,
+    /// It still pays a wallet the account's statement can't re-point
+    /// (MONEY.md#stolen-sign-ins, "What a rebind covers").
+    pub pays_earlier: Option<String>,
+}
+
+/// A statement waiting on its wallet's bind.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldStatement {
+    pub number: u64,
+    pub address: String,
+    /// When the wait ends, unix ms.
+    pub effective_at: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountBots {
+    pub bots: Vec<AccountBot>,
+    pub bot_cap: u64,
+    /// The address in force; zero isn't earning.
+    pub payout_address: String,
+    pub held: Option<HeldStatement>,
+    /// What reached an address the account signed for, in USDC's millionths,
+    /// as indexed.
+    pub paid_total: u64,
+    /// Shares whose transfer failed, as indexed. Claiming one emits nothing,
+    /// so what's still owed is the chain's `builderOwed`.
+    pub failed_total: u64,
+    pub next_statement: u64,
+    /// The earliest field a statement signed now would start from (unix
+    /// seconds), where the week's times are set. Each bot has its own.
+    pub starts_at: Option<u64>,
+    /// The same for one signed by a wallet whose bind is waiting, or held.
+    pub starts_after_wait: Option<u64>,
+}
+
+/// An account's bets across all its wallets, as indexed. What a claim signs
+/// for still reads the chain.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountBets {
+    pub pools: Vec<BetPool>,
+    /// The newest first.
+    pub activity: Vec<BetActivity>,
+}
+
+/// One wallet's whole position in one pool.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BetPool {
+    /// The session's id, or the week's.
+    pub id: String,
+    pub week: bool,
+    pub wallet: String,
+    pub arena_id: Option<String>,
+    pub close: u64,
+    /// In the week now running, or the last to have run: what "this week's
+    /// net" counts.
+    pub this_week: bool,
+    /// Only one bot is backed: as it stands, every stake comes back.
+    pub one_sided: bool,
+    pub total: u64,
+    pub stakes: Vec<BetStake>,
+    pub state: BetState,
+    /// What it pays by the contract's rules, claimed or not.
+    pub owed: u64,
+    pub claimed: Option<u64>,
+    /// What a week's claim passes: its bound final's entry, or the scheduled
+    /// final's until the binding is indexed (the contract checks its hash).
+    pub final_entry: Option<String>,
+    /// A session's round (0: the final) and who's in it, for its title.
+    pub round: Option<u64>,
+    pub against: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BetStake {
+    /// The bot's digest, `0x` hex, as the pool has it.
+    pub digest: String,
+    pub bot_id: Option<String>,
+    pub name: Option<String>,
+    pub amount: u64,
+    /// What the whole position returns if this bot alone finishes first and
+    /// betting closed now.
+    pub pays_if_first: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BetState {
+    Pending,
+    Won,
+    /// Backed one of several that shared first: the winners split the pool.
+    Tied,
+    Lost,
+    /// Only one bot was backed: refunded in full.
+    OneSided,
+    /// Nobody backed the winner: refunded less the fee.
+    NoWinningBacker,
+    Voided,
+    Cancelled,
+    KeyRevoked,
+    PastDeadline,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BetActivity {
+    pub kind: String,
+    pub wallet: String,
+    /// The session or week, for a bet or a claim.
+    pub id: Option<String>,
+    pub amount: u64,
+    pub block: u64,
+    pub tx_hash: String,
+    /// A bet someone else's money made: an auto-back fill from the deposit,
+    /// or a bet made for this wallet. It didn't leave the wallet.
+    pub paid_elsewhere: bool,
 }
 
 /// A JSON-RPC call relayed through the api, which holds the providers' keys.
@@ -615,8 +837,18 @@ endpoint!(
     WalletPasskeyAdd, Post, "/wallet/passkey", Verified, PasskeyAdd => Empty
 );
 endpoint!(
-    /// The account wallet's bets and claims as indexed (sessions and weeks).
+    /// One wallet's raw bet events. For a site built before `/account/bets`:
+    /// delete once that one has been live a release.
     WalletBetsGet, Get, "/wallet/bets", Verified, WalletAddress => Vec<serde_json::Value>
+);
+endpoint!(
+    /// The signed-in builder's bots and earning, as the site shows them. An
+    /// api key reads `BuilderStatusGet` instead.
+    AccountBotsGet, Get, "/account/bots", Verified, Empty => AccountBots
+);
+endpoint!(
+    /// The account's bets across all its wallets, and their activity.
+    AccountBetsGet, Get, "/account/bets", Verified, Empty => AccountBets
 );
 endpoint!(WalletOwnerLabelPost, Post, "/wallet/owner-label", Verified, OwnerLabel => Empty);
 endpoint!(
@@ -714,6 +946,10 @@ endpoint!(AdminBotRegister, Post, "/admin/bots/register", Admin, HouseBotReq => 
 endpoint!(AdminBotRename, Post, "/admin/bots/rename", Admin, BotRename => Empty);
 endpoint!(AdminBotRetire, Post, "/admin/bots/retire", Admin, RetireBot => Empty);
 endpoint!(AdminJobRequeue, Post, "/admin/jobs/requeue", Admin, IdOnly => Empty);
+endpoint!(
+    /// Retirement requests with no proof, one entry a bot.
+    AdminRetirements, Get, "/admin/retirements", Admin, Empty => Vec<RetirementQueued>
+);
 endpoint!(AdminRetirementJudge, Post, "/admin/retirements/judge", Admin, Judgement => Empty);
 endpoint!(AdminBindingRetiring, Post, "/admin/bindings/retiring", Admin, BindingOnly => Empty);
 endpoint!(AdminImageMark, Post, "/admin/images/mark", Admin, DigestOnly => Empty);
@@ -856,12 +1092,17 @@ mod tests {
             takes_key::<AuthConfirmReset>(),
             takes_key::<AuthSendVerification>(),
             takes_key::<AccountFinishRegistration>(),
-            takes_key::<WalletBindStart>(),
+            takes_key::<WalletSetupPost>(),
             takes_key::<WalletBindCancel>(),
             takes_key::<StatementsSubmit>(),
             takes_key::<RetireBySignin>(),
             takes_key::<RetireStopBySignin>(),
             takes_key::<RetireRequest>(),
+            takes_key::<AccountBetsGet>(),
+            takes_key::<AccountBotsGet>(),
+            takes_key::<RetireStopByWallet>(),
+            takes_key::<AdminRetirements>(),
+            takes_key::<WalletBetsGet>(),
         ];
         assert!(refused.iter().all(|taken| !taken));
     }

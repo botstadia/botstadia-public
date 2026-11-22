@@ -4,8 +4,11 @@
 //!
 //! - A deployed wallet claims what's claimable and withdraws, paying gas in
 //!   USDC through Circle's Paymaster, through a public bundler and a public
-//!   RPC tied to no account of ours. It finds claimable sessions by scanning
-//!   our settlement contract's events through that RPC.
+//!   RPC tied to no account of ours. It finds claimable sessions and weeks
+//!   by scanning our settlement contract's events through that RPC, and a
+//!   week's final's entry in the post that carried it. A claim never
+//!   decides the withdrawal: if the scan or the claims fail, or on the
+//!   user's say, it withdraws the balance without them.
 //! - An undeployed wallet can't pay for its own deploy in USDC, so the page
 //!   says how much ETH to send to the recovery key's address, and deploys it
 //!   from that key with the saved setup data.
@@ -14,15 +17,17 @@
 //! `config.yml`), and the user can replace the RPC and the bundler. The key
 //! never leaves the page: it signs here.
 
-use botstadia_chain::abi::Settlement;
+use botstadia_chain::abi::{Results, Settlement};
 use botstadia_chain::rpc::{BlockTag, Client, Transport};
 use botstadia_chain::sign::Key;
+use botstadia_chain::wallet::Contracts;
 use botstadia_chain::wallet::bundler::{Bundler, Estimate, Flavor, GasPrice, OpReceipt};
+use botstadia_chain::wallet::calls::{self, Claims};
 use botstadia_chain::wallet::flow::{self, Bundle};
+use botstadia_chain::wallet::money::{self, Money, Pool};
 use botstadia_chain::wallet::op::{OwnerSignature, UserOp};
 use botstadia_chain::wallet::recovery::{self, Save};
 use botstadia_chain::wallet::safe::{self, Setup};
-use botstadia_chain::wallet::{Contracts, calls};
 use botstadia_chain::{Address, B256, Bytes, U256, keccak256, tx};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -179,69 +184,358 @@ pub fn defaults() -> Result<String, JsValue> {
     }))
 }
 
-/// The wallet's sessions with a stake, and what each would pay now.
-async fn claimable(
+/// One range of logs. A public RPC hiccups: it's tried a few times before
+/// the scan gives up.
+async fn logs(
+    rpc: &Client<Fetch>,
+    address: Address,
+    from: u64,
+    to: u64,
+    topics: &Value,
+) -> anyhow::Result<Vec<Value>> {
+    let mut tries = 0;
+    loop {
+        let r = rpc
+            .request(
+                "eth_getLogs",
+                json!([{
+                    "address": format!("{address:#x}"),
+                    "fromBlock": format!("0x{from:x}"),
+                    "toBlock": format!("0x{to:x}"),
+                    "topics": topics,
+                }]),
+            )
+            .await;
+        match r {
+            // Anything but a list is a failure, never "no logs".
+            Ok(Value::Array(list)) => return Ok(list),
+            Ok(_) if tries >= 3 => anyhow::bail!("the RPC didn't answer with a list of logs"),
+            Ok(_) => {
+                tries += 1;
+                sleep(1000 * tries).await;
+            }
+            Err(e) if tries >= 3 => return Err(e),
+            Err(_) => {
+                tries += 1;
+                sleep(1000 * tries).await;
+            }
+        }
+    }
+}
+
+/// The blocks one log read takes.
+const SCAN: u64 = 10_000;
+/// More blocks a second than Base could make: it makes five today.
+const FASTEST: u64 = 1_000;
+
+/// A block's time. A public RPC hiccups, so it's asked a few times.
+async fn time_of(rpc: &Client<Fetch>, number: u64) -> anyhow::Result<u64> {
+    let mut tries = 0;
+    loop {
+        match rpc.block(BlockTag::Number(number)).await {
+            Ok(block) => return Ok(block.timestamp),
+            Err(e) if tries >= 3 => return Err(e),
+            Err(_) => {
+                tries += 1;
+                sleep(1000 * tries).await;
+            }
+        }
+    }
+}
+
+/// Whether `head` could be real: bounded by the time since the start block,
+/// not by a number, since a saved page has to work for as long as claims do.
+async fn check_head(rpc: &Client<Fetch>, start: u64, head: u64) -> anyhow::Result<()> {
+    let since = ((js_sys::Date::now() / 1000.0) as u64).saturating_sub(time_of(rpc, start).await?);
+    // A day's room for a clock that's behind.
+    let most = start.saturating_add(since.saturating_add(86_400).saturating_mul(FASTEST));
+    anyhow::ensure!(
+        (start..=most).contains(&head),
+        "that RPC's latest block ({head}) can't be right"
+    );
+    Ok(())
+}
+
+/// The first block at or after `time` (seconds), between `lo` and `hi`.
+async fn block_at(rpc: &Client<Fetch>, time: u64, lo: u64, hi: u64) -> anyhow::Result<u64> {
+    let (mut lo, mut hi) = (lo, hi);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if time_of(rpc, mid).await? < time {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo)
+}
+
+/// A week decided by its final's result, whose claim carries that entry.
+struct Decided {
+    week: B256,
+    final_session: B256,
+    pool_close: u64,
+    final_close: u64,
+}
+
+/// Put each decided week into `out` with its final's entry, read from the
+/// post that carried it: made between the week's pool closing and its final
+/// closing, so that's all that's searched.
+async fn with_entries(
     rpc: &Client<Fetch>,
     ch: &Chain,
-    wallet: Address,
-) -> anyhow::Result<Vec<(B256, U256)>> {
+    results: Address,
+    head: u64,
+    decided: Vec<Decided>,
+    out: &mut Vec<Pool>,
+) -> anyhow::Result<()> {
     use alloy_sol_types::SolEvent;
+    let topics = json!([format!("{:#x}", Results::Posted::SIGNATURE_HASH)]);
+    // Arenas' weeks share their times.
+    let mut spans = std::collections::BTreeMap::<(u64, u64), Vec<Decided>>::new();
+    for d in decided {
+        spans
+            .entry((d.pool_close, d.final_close))
+            .or_default()
+            .push(d);
+    }
+    let mut failed = None;
+    for (times, left) in spans {
+        // One span that can't be read never loses the others.
+        if let Err(e) = entries_in(rpc, ch, results, head, &topics, times, left, out).await {
+            failed = Some(e);
+        }
+    }
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// [`with_entries`] for the weeks sharing one pair of times.
+#[allow(clippy::too_many_arguments)]
+async fn entries_in(
+    rpc: &Client<Fetch>,
+    ch: &Chain,
+    results: Address,
+    head: u64,
+    topics: &Value,
+    (opened, closed): (u64, u64),
+    mut left: Vec<Decided>,
+    out: &mut Vec<Pool>,
+) -> anyhow::Result<()> {
+    let first = block_at(rpc, opened, ch.start_block, head).await?;
+    let mut to = block_at(rpc, closed, first, head).await?;
+    while !left.is_empty() {
+        let from = to.saturating_sub(SCAN - 1).max(first);
+        for l in logs(rpc, results, from, to, topics).await? {
+            let Some(data) = l["data"].as_str().and_then(|d| d.parse::<Bytes>().ok()) else {
+                continue;
+            };
+            left.retain(|d| match calls::posted_entry(&data, d.final_session) {
+                Some(entry) => {
+                    out.push(Pool {
+                        id: d.week,
+                        week: Some(entry),
+                    });
+                    false
+                }
+                None => true,
+            });
+        }
+        if from <= first {
+            break;
+        }
+        to = from - 1;
+    }
+    Ok(())
+}
+
+/// Where a week stands for its claim: `None` if it's claimed already.
+async fn week_pool(
+    rpc: &Client<Fetch>,
+    ch: &Chain,
+    results: Address,
+    wallet: Address,
+    week: B256,
+) -> anyhow::Result<Option<Result<Pool, Decided>>> {
+    let settlement = ch.contracts.settlement;
+    let call = Settlement::weekClaimedCall {
+        _0: week,
+        _1: wallet,
+    };
+    if rpc.call_typed(settlement, &call, BlockTag::Latest).await? {
+        return Ok(None);
+    }
+    let state = rpc
+        .call_typed(results, &Results::weekStateCall { week }, BlockTag::Latest)
+        .await?;
+    if !state.isCancelled && state.finalSession != B256::ZERO {
+        let call = Results::sessionStateCall {
+            session: state.finalSession,
+        };
+        let of_final = rpc.call_typed(results, &call, BlockTag::Latest).await?;
+        if of_final.resolved && !of_final.voided {
+            let times = rpc
+                .call_typed(
+                    settlement,
+                    &Settlement::weekPoolsCall(week),
+                    BlockTag::Latest,
+                )
+                .await?;
+            return Ok(Some(Err(Decided {
+                week,
+                final_session: state.finalSession,
+                pool_close: times.poolClose.to::<u64>(),
+                final_close: times.finalClose.to::<u64>(),
+            })));
+        }
+    }
+    // A refund, or still pending: no result decides it, so no entry.
+    Ok(Some(Ok(Pool {
+        id: week,
+        week: Some(Bytes::new()),
+    })))
+}
+
+/// What the scan found, and what it couldn't read.
+struct Found {
+    pools: Vec<Pool>,
+    missed: Option<String>,
+}
+
+/// The pools the wallet has a stake in, sessions and weeks. A week that
+/// can't be read is left out, and never the rest with it.
+async fn scan(rpc: &Client<Fetch>, ch: &Chain, wallet: Address) -> anyhow::Result<Found> {
+    use alloy_sol_types::SolEvent;
+    let settlement = ch.contracts.settlement;
     let head = rpc.block_number().await?;
-    let topic_bettor = B256::left_padding_from(wallet.as_slice());
-    let mut sessions: Vec<B256> = Vec::new();
+    check_head(rpc, ch.start_block, head).await?;
+    let week_topic = format!("{:#x}", Settlement::WeekBet::SIGNATURE_HASH);
+    // Both events name the pool first and the bettor second.
+    let topics = json!([
+        [
+            format!("{:#x}", Settlement::Bet::SIGNATURE_HASH),
+            week_topic
+        ],
+        null,
+        format!("{:#x}", B256::left_padding_from(wallet.as_slice())),
+    ]);
+    let (mut sessions, mut weeks) = (Vec::<B256>::new(), Vec::<B256>::new());
     let mut from = ch.start_block;
     while from <= head {
-        let to = (from + 9_999).min(head);
-        // A public RPC hiccups: each range is tried a few times before the
-        // scan gives up.
-        let mut tries = 0;
-        let logs = loop {
-            let r = rpc
-                .request(
-                    "eth_getLogs",
-                    json!([{
-                        "address": format!("{:#x}", ch.contracts.settlement),
-                        "fromBlock": format!("0x{from:x}"),
-                        "toBlock": format!("0x{to:x}"),
-                        "topics": [format!("{:#x}", Settlement::Bet::SIGNATURE_HASH), null, format!("{topic_bettor:#x}")],
-                    }]),
-                )
-                .await;
-            match r {
-                Ok(v) => break v,
-                Err(e) if tries >= 3 => return Err(e),
-                Err(_) => {
-                    tries += 1;
-                    sleep(1000 * tries).await;
-                }
-            }
-        };
-        for l in logs.as_array().into_iter().flatten() {
-            if let Some(s) = l["topics"][1].as_str().and_then(|t| t.parse::<B256>().ok())
-                && !sessions.contains(&s)
+        let to = (from + SCAN - 1).min(head);
+        for l in logs(rpc, settlement, from, to, &topics).await? {
+            let list = if l["topics"][0].as_str() == Some(week_topic.as_str()) {
+                &mut weeks
+            } else {
+                &mut sessions
+            };
+            if let Some(id) = l["topics"][1].as_str().and_then(|t| t.parse::<B256>().ok())
+                && !list.contains(&id)
             {
-                sessions.push(s);
+                list.push(id);
             }
         }
         from = to + 1;
     }
-    let mut out = Vec::new();
-    for s in sessions {
-        let r = rpc
-            .call_typed(
-                ch.contracts.settlement,
-                &Settlement::claimableCall {
-                    session: s,
-                    bettor: wallet,
-                },
-                BlockTag::Latest,
-            )
-            .await?;
-        if r.amount > U256::ZERO {
-            out.push((s, r.amount));
+    let mut found = Found {
+        pools: sessions
+            .into_iter()
+            .map(|id| Pool { id, week: None })
+            .collect(),
+        missed: None,
+    };
+    if weeks.is_empty() {
+        return Ok(found);
+    }
+    let results = match rpc
+        .call_typed(settlement, &Settlement::RESULTSCall {}, BlockTag::Latest)
+        .await
+    {
+        Ok(results) => results,
+        Err(e) => {
+            found.missed = Some(format!("week pools couldn't be read: {e:#}"));
+            return Ok(found);
+        }
+    };
+    let mut decided = Vec::new();
+    for week in weeks {
+        match week_pool(rpc, ch, results, wallet, week).await {
+            Ok(Some(Ok(pool))) => found.pools.push(pool),
+            Ok(Some(Err(d))) => decided.push(d),
+            Ok(None) => {}
+            Err(e) => found.missed = Some(format!("a week pool couldn't be read: {e:#}")),
         }
     }
-    Ok(out)
+    let wanted = decided.len() + found.pools.len();
+    match with_entries(rpc, ch, results, head, decided, &mut found.pools).await {
+        Ok(()) if found.pools.len() < wanted => {
+            found.missed = Some("a week's final wasn't found in the posts".into());
+        }
+        Ok(()) => {}
+        Err(e) => found.missed = Some(format!("a week's final couldn't be read: {e:#}")),
+    }
+    Ok(found)
+}
+
+/// [`money::read`], asked a few times: one hiccup mustn't waste the scan.
+async fn money_read(
+    rpc: &Client<Fetch>,
+    c: &Contracts,
+    wallet: Address,
+    pools: &[Pool],
+) -> anyhow::Result<Money> {
+    let mut tries = 0;
+    loop {
+        match money::read(rpc, c, wallet, pools).await {
+            Ok(now) => return Ok(now),
+            Err(e) if tries >= 3 => return Err(e),
+            Err(_) => {
+                tries += 1;
+                sleep(1000 * tries).await;
+            }
+        }
+    }
+}
+
+/// The balance and what's claimable, and why any claim was left out. Only
+/// the balance itself failing fails this: a claim never decides.
+async fn money_of(
+    rpc: &Client<Fetch>,
+    ch: &Chain,
+    wallet: Address,
+    claiming: bool,
+) -> anyhow::Result<(Money, Option<String>)> {
+    let c = &ch.contracts;
+    let mut missed = None;
+    if claiming {
+        match scan(rpc, ch, wallet).await {
+            Ok(found) => match money_read(rpc, c, wallet, &found.pools).await {
+                Ok(now) => {
+                    let unread = (now.unread > 0)
+                        .then(|| format!("{} of the pools didn't answer", now.unread));
+                    return Ok((now, found.missed.or(unread)));
+                }
+                Err(e) => missed = Some(format!("claims couldn't be read: {e:#}")),
+            },
+            Err(e) => missed = Some(format!("the scan for claims failed: {e:#}")),
+        }
+    }
+    let usdc = rpc
+        .call_typed(
+            c.usdc,
+            &calls::balanceOfCall { who: wallet },
+            BlockTag::Latest,
+        )
+        .await?;
+    let claimable = Vec::new();
+    let now = Money {
+        usdc,
+        claimable,
+        unread: 0,
+    };
+    Ok((now, missed))
 }
 
 /// What the page knows: the wallet, whether it's deployed, its USDC, what's
@@ -252,6 +546,7 @@ pub async fn inspect(
     save_text: String,
     key_text: String,
     rpc_url: String,
+    skip_claims: bool,
 ) -> Result<String, JsValue> {
     out(async {
         let save = Save::parse(&save_text)?;
@@ -277,13 +572,8 @@ pub async fn inspect(
             )
             .await?;
         let deployed = code.as_str().is_some_and(|s| s.len() > 2);
-        let usdc = rpc
-            .call_typed(
-                c.usdc,
-                &calls::balanceOfCall { who: save.wallet },
-                BlockTag::Latest,
-            )
-            .await?;
+        let (now, missed) = money_of(&rpc, &ch, save.wallet, deployed && !skip_claims).await?;
+        let usdc = now.usdc;
         let owners = flow::owners(&rpc, c, save.wallet, &save.setup_data).await?;
         let mut v = json!({
             "wallet": format!("{:#x}", save.wallet),
@@ -302,15 +592,23 @@ pub async fn inspect(
                 .into();
         }
         if deployed {
-            let list = claimable(&rpc, &ch, save.wallet).await?;
+            let list = now.claimable;
+            v["claim_missed"] = missed.into();
             v["claimable_total"] = list
                 .iter()
-                .fold(U256::ZERO, |t, (_, a)| t + *a)
+                .fold(U256::ZERO, |t, x| t + x.amount)
                 .to_string()
                 .into();
+            v["claimable_next"] = Claims::from_claimable(&list).total.to_string().into();
             v["claimable"] = list
                 .iter()
-                .map(|(s, a)| json!({ "session": format!("{s:#x}"), "amount": a.to_string() }))
+                .map(|x| {
+                    json!({
+                        "id": format!("{:#x}", x.id),
+                        "week": x.week.is_some(),
+                        "amount": x.amount.to_string(),
+                    })
+                })
                 .collect::<Vec<_>>()
                 .into();
         } else if let Some(k) = &key {
@@ -392,6 +690,7 @@ pub async fn withdraw(
     amount: String,
     rpc_url: String,
     bundler_url: String,
+    skip_claims: bool,
 ) -> Result<String, JsValue> {
     out(async {
         let save = Save::parse(&save_text)?;
@@ -412,15 +711,6 @@ pub async fn withdraw(
             owners.contains(&key.address()),
             "that recovery key isn't an owner of this wallet any more"
         );
-        let list = claimable(&rpc, &ch, save.wallet).await?;
-        let usdc = rpc
-            .call_typed(
-                c.usdc,
-                &calls::balanceOfCall { who: save.wallet },
-                BlockTag::Latest,
-            )
-            .await?;
-        let claim_total = list.iter().fold(U256::ZERO, |t, (_, a)| t + *a);
         // Everything means all but the paymaster's deposit, which it takes
         // before the calls run and refunds after: sized once the gas is known.
         let everything = amount.trim().is_empty();
@@ -434,25 +724,22 @@ pub async fn withdraw(
             U256::from((v * 1e6).round() as u64)
         };
         anyhow::ensure!(everything || fixed > U256::ZERO, "nothing to withdraw");
-        let claims: Vec<B256> = list.iter().map(|(s, _)| *s).collect();
-        let sent = std::cell::Cell::new(U256::ZERO);
-        let build = |max_cost: U256| {
-            let value = if everything && max_cost == U256::MAX {
-                // The estimate's placeholder: half, which always fits.
-                (usdc + claim_total) / U256::from(2)
-            } else if everything {
-                (usdc + claim_total).saturating_sub(max_cost.max(U256::from(1)))
-            } else {
-                fixed
-            };
-            sent.set(value);
-            let mut v = Vec::new();
-            if !claims.is_empty() {
-                v.push(calls::claim(c, claims.clone()));
-            }
-            v.push(calls::transfer(c, to, value.max(U256::from(1))));
-            v
-        };
+        let (now, mut missed) = money_of(&rpc, &ch, save.wallet, !skip_claims).await?;
+        let claims = Claims::from_claimable(&now.claimable);
+        anyhow::ensure!(
+            fixed <= now.usdc + claims.total,
+            "the wallet holds less than that{}",
+            missed
+                .as_ref()
+                .map(|m| format!(" ({m})"))
+                .unwrap_or_default()
+        );
+        // With the claims, then without, if that didn't go out and the
+        // balance alone covers it.
+        let mut tries = vec![claims.clone()];
+        if !claims.is_empty() && fixed <= now.usdc && !now.usdc.is_zero() {
+            tries.push(Claims::default());
+        }
         let url = if bundler_url.is_empty() {
             ch.bundlers.first().cloned().unwrap_or_default()
         } else {
@@ -471,13 +758,45 @@ pub async fn withdraw(
                 rpc_url
             })),
         };
-        let r =
-            flow::send_built(&rpc, &bundle, &KeySigner(key), c, save.wallet, build, sleep).await?;
-        Ok(json!({
-            "tx": format!("{:#x}", r.transaction_hash),
-            "claimed": claim_total.to_string(),
-            "sent": sent.get().to_string(),
-        }))
+        let signer = KeySigner(key);
+        let mut last = None;
+        for claims in tries {
+            let total = now.usdc + claims.total;
+            let sent = std::cell::Cell::new(U256::ZERO);
+            let build = |max_cost: U256| {
+                let value = if everything && max_cost == U256::MAX {
+                    // The estimate's placeholder: half, which always fits.
+                    total / U256::from(2)
+                } else if everything {
+                    total.saturating_sub(max_cost.max(U256::from(1)))
+                } else {
+                    fixed
+                };
+                sent.set(value);
+                let mut v = claims.calls(c);
+                v.push(calls::transfer(c, to, value.max(U256::from(1))));
+                v
+            };
+            match flow::send_built(&rpc, &bundle, &signer, c, save.wallet, build, sleep).await {
+                Ok(r) => {
+                    if let Some(e) = last.take() {
+                        missed = Some(format!(
+                            "withdrawn without claiming, since with them it failed: {e:#}"
+                        ));
+                    }
+                    return Ok(json!({
+                        "tx": format!("{:#x}", r.transaction_hash),
+                        "claimed": claims.total.to_string(),
+                        "sent": sent.get().to_string(),
+                        "claim_missed": missed,
+                    }));
+                }
+                // It may still land: never a second in its place.
+                Err(e) if flow::may_have_landed(&e) => return Err(e),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("nothing was sent")))
     }
     .await)
 }

@@ -138,24 +138,25 @@ pub const GUEST_IMAGE_ID: &str =
 /// (results contract) on the one chain, sharing one Groth16 verifier.
 pub const BASE_SEPOLIA: ChainConstants = ChainConstants {
     chain_id: 84532,
-    // In the order the runner pairs them: two that agree are enough, and
-    // the free tiers' daily allowances run out one at a time.
+    // In the order they're asked: the first to answer, and for agreement the
+    // first two. The keyless one first, then the largest free allowance, so
+    // no keyed allowance pays for every wait.
     providers: &[
-        Provider {
-            name: "alchemy",
-            url: "https://base-sepolia.g.alchemy.com/v2/{key}",
-        },
         Provider {
             name: "base",
             url: "https://sepolia.base.org",
+        },
+        Provider {
+            name: "drpc",
+            url: "https://lb.drpc.org/ogrpc?network=base-sepolia&dkey={key}",
         },
         Provider {
             name: "infura",
             url: "https://base-sepolia.infura.io/v3/{key}",
         },
         Provider {
-            name: "drpc",
-            url: "https://lb.drpc.org/ogrpc?network=base-sepolia&dkey={key}",
+            name: "alchemy",
+            url: "https://base-sepolia.g.alchemy.com/v2/{key}",
         },
     ],
     verifier: "0xe403B9a3B6aD517E1ACFeb3C05824A5cE808a423",
@@ -245,12 +246,12 @@ mod constant_tests {
     #[test]
     fn a_launch_chooses_keys_never_hosts() {
         let urls = rpc_urls(&BASE_SEPOLIA, "alchemy=a1, infura=b2,drpc=c-3").unwrap();
-        assert_eq!(urls[0], "https://base-sepolia.g.alchemy.com/v2/a1");
-        assert_eq!(urls[1], "https://sepolia.base.org");
+        assert_eq!(urls[0], "https://sepolia.base.org");
         assert_eq!(
-            urls[3],
+            urls[1],
             "https://lb.drpc.org/ogrpc?network=base-sepolia&dkey=c-3"
         );
+        assert_eq!(urls[3], "https://base-sepolia.g.alchemy.com/v2/a1");
         // A key that would bend the URL, an unknown provider, a missing key.
         assert!(rpc_urls(&BASE_SEPOLIA, "alchemy=x@evil.com/,infura=b,drpc=c").is_err());
         assert!(rpc_urls(&BASE_SEPOLIA, "alchemy=a,infura=b,drpc=c,evil=d").is_err());

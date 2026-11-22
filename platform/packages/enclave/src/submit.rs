@@ -8,6 +8,8 @@ use botstadia_chain::rpc::{BlockTag, Client, Http, Receipt};
 use botstadia_chain::sign::Key;
 use botstadia_chain::{Address, B256, Bytes, tx};
 
+use crate::chain_view::first_answer;
+
 #[allow(async_fn_in_trait)]
 pub trait Submitter {
     /// Send `approveKey` with the published proof, from the key itself.
@@ -26,63 +28,31 @@ pub struct ChainSubmitter {
 }
 
 impl ChainSubmitter {
-    /// Send one call priced to land and wait for its receipt, trying each
-    /// provider in turn.
+    /// Send one call priced to land and wait for its receipt. A receipt that
+    /// can't be read is asked again: the send may well have landed.
     pub async fn send(&self, to: Address, data: Vec<u8>, polls: usize) -> anyhow::Result<Receipt> {
-        let mut last = anyhow::anyhow!("no provider");
-        for p in &self.providers {
-            let attempt: anyhow::Result<Receipt> = async {
-                let nonce = p.nonce(self.key.address(), BlockTag::Latest).await?;
-                let gas = p.estimate_gas(self.key.address(), to, &data).await?;
-                let price = p.gas_price().await?.max(1);
-                let signed = tx::sign(
-                    &self.key,
-                    self.chain_id,
-                    nonce,
-                    gas + gas / 4,
-                    tx::Fees {
-                        max_fee_per_gas: price * 2,
-                        max_priority_fee_per_gas: price,
-                    },
-                    &tx::Call {
-                        to,
-                        data: data.clone(),
-                        value: Default::default(),
-                    },
-                )?;
-                p.send_raw(&signed.raw).await?;
-                for _ in 0..polls {
-                    if let Some(r) = p.receipt(signed.hash).await? {
-                        anyhow::ensure!(r.succeeded(), "reverted");
-                        return Ok(r);
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                }
-                anyhow::bail!("not included yet")
+        let nonce = self.next_nonce().await?;
+        let hash = self.send_at(nonce, to, data, 0).await?;
+        for _ in 0..polls {
+            if let Some(r) = self.receipt(hash).await? {
+                anyhow::ensure!(r.succeeded(), "reverted");
+                return Ok(r);
             }
-            .await;
-            match attempt {
-                Ok(r) => return Ok(r),
-                Err(e) => last = e,
-            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
-        Err(last)
+        anyhow::bail!("not included yet")
     }
 }
 
 impl Submitter for ChainSubmitter {
     async fn approve_key(&self, journal: &[u8], seal: &[u8]) -> anyhow::Result<()> {
-        let p = &self.providers[0];
-        let verifier = p
-            .call_typed(
-                self.results,
-                &Results::verifierIdCall {
-                    verifier: self.verifier,
-                    guestImageId: self.guest_image_id,
-                },
-                BlockTag::Latest,
-            )
-            .await?;
+        let call = Results::verifierIdCall {
+            verifier: self.verifier,
+            guestImageId: self.guest_image_id,
+        };
+        let verifier = first_answer!(self.providers, p => p
+            .call_typed(self.results, &call, BlockTag::Latest)
+            .await)?;
         let data = Results::approveKeyCall {
             verifier,
             seal: Bytes::from(seal.to_vec()),
@@ -112,9 +82,19 @@ pub trait ChainTx {
 
 impl ChainTx for ChainSubmitter {
     async fn next_nonce(&self) -> anyhow::Result<u64> {
-        self.providers[0]
-            .nonce(self.key.address(), BlockTag::Latest)
-            .await
+        // The higher of two: one a block behind would reuse a spent nonce.
+        let mut seen = Vec::with_capacity(2);
+        let mut last = anyhow::anyhow!("no provider");
+        for p in &self.providers {
+            match p.nonce(self.key.address(), BlockTag::Latest).await {
+                Ok(n) => seen.push(n),
+                Err(e) => last = e,
+            }
+            if seen.len() == 2 {
+                break;
+            }
+        }
+        seen.into_iter().max().ok_or(last)
     }
 
     async fn send_at(
@@ -124,35 +104,46 @@ impl ChainTx for ChainSubmitter {
         data: Vec<u8>,
         level: u32,
     ) -> anyhow::Result<B256> {
+        // The higher of two: one behind simulates the cheap rejection path,
+        // and the real anchor runs out of gas.
+        let mut estimates = Vec::with_capacity(2);
         let mut last = anyhow::anyhow!("no provider");
         for p in &self.providers {
-            let attempt: anyhow::Result<B256> = async {
-                let gas = p.estimate_gas(self.key.address(), to, &data).await?;
-                let mut price = p.gas_price().await?.max(1) * 2;
-                for _ in 0..level {
-                    price += price / 4 + 1;
-                }
-                let signed = tx::sign(
-                    &self.key,
-                    self.chain_id,
-                    nonce,
-                    gas + gas / 4,
-                    tx::Fees {
-                        max_fee_per_gas: price,
-                        max_priority_fee_per_gas: price / 2,
-                    },
-                    &tx::Call {
-                        to,
-                        data: data.clone(),
-                        value: Default::default(),
-                    },
-                )?;
-                p.send_raw(&signed.raw).await?;
-                Ok(signed.hash)
+            match p.estimate_gas(self.key.address(), to, &data).await {
+                Ok(gas) => estimates.push(gas),
+                Err(e) => last = e,
             }
-            .await;
-            match attempt {
-                Ok(h) => return Ok(h),
+            if estimates.len() == 2 {
+                break;
+            }
+        }
+        let gas = estimates.into_iter().max().ok_or(last)?;
+        let mut price = first_answer!(self.providers, p => p.gas_price().await)?.max(1) * 2;
+        for _ in 0..level {
+            price += price / 4 + 1;
+        }
+        let signed = tx::sign(
+            &self.key,
+            self.chain_id,
+            nonce,
+            gas + gas / 4,
+            tx::Fees {
+                max_fee_per_gas: price,
+                max_priority_fee_per_gas: price / 2,
+            },
+            &tx::Call {
+                to,
+                data,
+                value: Default::default(),
+            },
+        )?;
+        // The same signed bytes to each: one that forwarded them and then
+        // timed out leaves the next saying it knows them.
+        let mut last = anyhow::anyhow!("no provider");
+        for p in &self.providers {
+            match p.send_raw(&signed.raw).await {
+                Ok(_) => return Ok(signed.hash),
+                Err(e) if format!("{e:#}").contains("already known") => return Ok(signed.hash),
                 Err(e) => last = e,
             }
         }

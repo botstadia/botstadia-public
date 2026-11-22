@@ -74,7 +74,15 @@ pub struct Batcher {
     /// Each anchored session's anchor hash and block, from its batch's
     /// `Anchored` event (an anchor batcher only).
     anchored: Mutex<std::collections::HashMap<B256, (B256, u64)>>,
+    /// The last flush failed: the next waits for its window, or a failure
+    /// would be sent again on every turn of the runner's loop.
+    /// Which window, plus one; zero for none.
+    failed: std::sync::atomic::AtomicU64,
 }
+
+/// Replacements at one nonce before a batch waits for its next window: about
+/// a minute, and fourteen times the first fee.
+const MAX_LEVELS: u32 = 12;
 
 impl Batcher {
     /// A batcher of results and ratings, or (fed only [`Entry::Anchor`]) of
@@ -85,6 +93,7 @@ impl Batcher {
             limits,
             results,
             anchored: Mutex::new(Default::default()),
+            failed: Default::default(),
         }
     }
 
@@ -122,11 +131,17 @@ impl Batcher {
     /// Whether a batch is due now.
     pub fn due(&self, now: u64, boundary: bool) -> bool {
         let q = self.queue.lock().expect("batch queue");
+        let failed = self.failed.load(std::sync::atomic::Ordering::Relaxed);
+        // Never on the api's word alone: a failing heartbeat eats the
+        // boundary, and the next window still sends.
+        let this_window = now / self.limits.window_ms.max(1) + 1;
+        let may = failed == 0 || this_window > failed;
         !q.is_empty()
             && (boundary
-                || q.len() >= self.limits.size
-                || q.iter()
-                    .any(|p| now.saturating_sub(p.queued_at) >= self.limits.age_ms))
+                || (may
+                    && (q.len() >= self.limits.size
+                        || q.iter()
+                            .any(|p| now.saturating_sub(p.queued_at) >= self.limits.age_ms))))
     }
 
     /// Send what's held, replacing a held send at the same nonce with a
@@ -138,6 +153,7 @@ impl Batcher {
         pause: impl Fn() -> F,
     ) -> anyhow::Result<usize> {
         let mut landed = 0;
+        self.failed.store(0, std::sync::atomic::Ordering::Relaxed);
         loop {
             let mut batch: Vec<Pending> = {
                 let mut q = self.queue.lock().expect("batch queue");
@@ -163,6 +179,10 @@ impl Batcher {
                         }
                     }
                     q.splice(0..0, back);
+                    self.failed.store(
+                        now / self.limits.window_ms.max(1) + 1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     return Err(e);
                 }
             };
@@ -219,6 +239,7 @@ impl Batcher {
                 pause().await;
             }
             // Held: a smaller batch at the same nonce, the rest next.
+            anyhow::ensure!(level < MAX_LEVELS, "held through every replacement");
             level += 1;
             if batch.len() > 1 {
                 let rest = batch.split_off(batch.len().div_ceil(2));
