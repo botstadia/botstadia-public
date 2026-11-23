@@ -61,7 +61,7 @@
 
   <div id="withdraw-box" class="box" hidden>
     <h2>Claim and withdraw</h2>
-    <p>One step claims what's claimable, sessions and weeks (the 40 largest at a time), and sends USDC to an address you choose, on Base. Gas is paid in USDC from the wallet.</p>
+    <p>One step claims what's claimable, sessions and weeks (the 40 largest at a time), takes back anything set aside for auto-back and clears it, and sends USDC to an address you choose, on Base. Gas is paid in USDC from the wallet.</p>
     <label for="to">Send to (a Base address you control)</label>
     <input id="to" spellcheck="false" placeholder="0x…">
     <label for="amount">Amount in USDC (blank: everything but what the gas could take, which stays in the wallet)</label>
@@ -93,6 +93,7 @@ async function check() {
     read_save($("save").value, $("key").value);
     const w = JSON.parse(await inspect($("save").value, $("key").value, $("rpc").value.trim(), $("skip").checked));
     let html = `Wallet <span class="mono">${text(w.wallet)}</span> on chain ${w.chain_id}<br>USDC: <strong>${usdc(w.usdc)}</strong>`;
+    if (w.set_aside && w.set_aside !== "0") html += `<br>Set aside for auto-back: <strong>${usdc(w.set_aside)}</strong> (taken back, and auto-back cleared, in the same step)`;
     // Nothing read isn't nothing owed: no zero where a read was missed.
     if (w.claimable_total && !$("skip").checked && !(w.claim_missed && w.claimable_total === "0")) html += `<br>Ready to claim: <strong>${usdc(w.claimable_total)}</strong>`;
     if (w.claimable_next && w.claimable_next !== w.claimable_total) html += `<br>The next step claims <strong>${usdc(w.claimable_next)}</strong> of it: run it again for the rest.`;
@@ -124,7 +125,7 @@ $("withdraw").onclick = async () => {
   say("Claiming and withdrawing…");
   try {
     const r = JSON.parse(await withdraw($("save").value, $("key").value, $("to").value, $("amount").value, $("rpc").value.trim(), $("bundler").value.trim(), $("skip").checked));
-    say(`Done: claimed ${usdc(r.claimed)} and sent ${usdc(r.sent)} USDC in <span class="mono">${text(r.tx)}</span>.${r.claim_missed ? `<br>Claims left for later: ${text(r.claim_missed)}` : ""}`, "ok");
+    say(`Done: claimed ${usdc(r.claimed)}, took back ${usdc(r.taken_back || "0")} from auto-back and sent ${usdc(r.sent)} USDC in <span class="mono">${text(r.tx)}</span>.${r.claim_missed ? `<br>Claims left for later: ${text(r.claim_missed)}` : ""}`, "ok");
   } catch (e) { say(text(e), "warn"); }
   finally { $("withdraw").disabled = false; }
 };

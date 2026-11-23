@@ -843,6 +843,63 @@ endpoint!(
     /// delete once that one has been live a release.
     WalletBetsGet, Get, "/wallet/bets", Verified, WalletAddress => Vec<serde_json::Value>
 );
+/// One auto-back of the account's (MONEY.md#standing-orders), as indexed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountOrder {
+    /// The wallet it belongs to.
+    pub owner: String,
+    /// The bot's bundle digest, `sha256-…`, which an order names.
+    pub digest: String,
+    pub bot_id: Option<String>,
+    pub name: Option<String>,
+    pub arena_id: Option<String>,
+    /// verifying | active | retired, or none for a digest we don't know.
+    pub bot_state: Option<String>,
+    pub held: bool,
+    pub code_exposed: bool,
+    /// USDC millionths a session.
+    pub amount: u64,
+    pub daily_cap: u64,
+    /// Sessions it filled today (UTC), as the contract counts.
+    pub filled_today: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountOrders {
+    pub orders: Vec<AccountOrder>,
+    /// What each wallet has set aside, as indexed; the chain is the truth.
+    pub balances: Vec<(String, u64)>,
+}
+
+endpoint!(
+    /// The account's auto-backs across its wallets.
+    AccountOrdersGet, Get, "/account/orders", Verified, Empty => AccountOrders
+);
+endpoint!(
+    /// Every notice choice, as the person has it (OPERATIONS.md#notifications).
+    NoticeChoicesGet, Get, "/account/notices", Verified, Empty => crate::notices::NoticeChoices
+);
+endpoint!(
+    /// Set one notice choice, answering all of them.
+    NoticeChoiceSet, Post, "/account/notices", Verified, crate::notices::NoticeChoice => crate::notices::NoticeChoices
+);
+endpoint!(
+    /// The account's recent notices, as the site lists them.
+    NoticesRecentGet, Get, "/account/notices/recent", Verified, Empty => Vec<crate::notices::RecentNotice>
+);
+endpoint!(
+    /// The bots the account follows.
+    FollowsGet, Get, "/account/follows", Verified, Empty => Vec<crate::notices::FollowedBot>
+);
+endpoint!(
+    /// Follow or unfollow a bot, answering the list.
+    FollowSet, Post, "/follows", Verified, crate::notices::Follow => Vec<crate::notices::FollowedBot>
+);
+endpoint!(
+    /// An emailed notice's opt-out link, confirmed on the page by a press:
+    /// its token turns that one choice off and nothing else.
+    NoticeOptOutPost, Post, "/notices/opt-out", Public, crate::notices::NoticeOptOut => Empty
+);
 endpoint!(
     /// The signed-in builder's bots and earning, as the site shows them. An
     /// api key reads `BuilderStatusGet` instead.
@@ -1102,10 +1159,252 @@ mod tests {
             takes_key::<RetireRequest>(),
             takes_key::<AccountBetsGet>(),
             takes_key::<AccountBotsGet>(),
+            takes_key::<NoticeChoicesGet>(),
+            takes_key::<AccountOrdersGet>(),
+            takes_key::<SaferGet>(),
+            takes_key::<SaferLimitPost>(),
+            takes_key::<SaferBlockPost>(),
+            takes_key::<SaferBlockSignPost>(),
+            takes_key::<NoticesRecentGet>(),
+            takes_key::<NoticeChoiceSet>(),
+            takes_key::<FollowsGet>(),
+            takes_key::<FollowSet>(),
+            takes_key::<NoticeOptOutPost>(),
+            takes_key::<GeoGet>(),
             takes_key::<RetireStopByWallet>(),
             takes_key::<AdminRetirements>(),
             takes_key::<WalletBetsGet>(),
         ];
         assert!(refused.iter().all(|taken| !taken));
+    }
+}
+
+// --- safer play (MONEY.md#safer-play) ----------------------------------------
+
+/// One period's limit, in USDC millionths, with any raise waiting.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferLimit {
+    /// day | week | month: rolling 24 hours, 7 days, 31 days.
+    pub period: String,
+    /// In force now; none is no limit.
+    pub amount: Option<u64>,
+    /// A raise waiting its cooling-off: what it becomes (none for no limit)
+    /// and when, unix ms.
+    pub raise: Option<(Option<u64>, u64)>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferBlock {
+    pub id: String,
+    /// timeout | exclusion
+    pub kind: String,
+    pub started_at: u64,
+    /// As asked; none for good.
+    pub asked_end: Option<u64>,
+    /// When it really ends: as asked once the wallet signs, else no later
+    /// than the unsigned most. None for good.
+    pub ends_at: Option<u64>,
+    pub signed: bool,
+    /// What the wallet signs to let it run as asked, when that's longer.
+    pub to_sign: Option<String>,
+}
+
+/// An account's safer play, with what it has spent and its orders' burn in
+/// each period, in USDC millionths.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferPlay {
+    pub limits: Vec<SaferLimit>,
+    pub block: Option<SaferBlock>,
+    /// Bet in each rolling period, as indexed: (day, week, month).
+    pub spent: (u64, u64, u64),
+    /// Its standing orders' burn for each period: (day, week, month).
+    pub burn: (u64, u64, u64),
+    /// What a bet or a new order may add in each period now.
+    pub room: (Option<u64>, Option<u64>, Option<u64>),
+    /// The chain is indexed to this block: a bet the site placed in a later
+    /// block isn't counted yet, and the site counts it itself.
+    #[serde(default)]
+    pub indexed_to: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferLimitSet {
+    pub period: String,
+    pub amount: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferBlockStart {
+    /// timeout | exclusion
+    pub kind: String,
+    /// Its length; none for good (an exclusion only).
+    pub days: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferBlockSign {
+    pub id: String,
+    pub signer: String,
+    pub signature: String,
+}
+
+/// What the account's wallet signs to let a block run past the unsigned most:
+/// the page composes it itself, so the server never chooses what's signed.
+/// `account` is the statement reference.
+pub fn block_message(account: &str, id: &str, kind: &str, until_ms: Option<u64>) -> String {
+    let until = until_ms.map_or("for good".to_string(), |at| {
+        format!("until {}", utc_minute(at))
+    });
+    format!(
+        "BotStadia: no betting for me, {until} ({kind}). It can't be ended early.\naccount: {account}\nblock: {id}"
+    )
+}
+
+/// A moment as `2026-11-23 01:59 UTC`, the same on every side.
+pub fn utc_minute(ms: u64) -> String {
+    let (days, rest) = ((ms / 86_400_000) as i64, ms % 86_400_000);
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        rest / 3_600_000,
+        rest % 3_600_000 / 60_000
+    )
+}
+
+#[cfg(test)]
+mod block_message_tests {
+    use super::*;
+
+    #[test]
+    fn moments_word_the_same_everywhere() {
+        assert_eq!(utc_minute(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc_minute(1_795_553_918_000), "2026-11-24 20:58 UTC");
+        assert_eq!(utc_minute(951_782_400_000), "2000-02-29 00:00 UTC");
+        assert!(block_message("0xab", "b1", "exclusion", None).contains("for good (exclusion)"));
+    }
+}
+
+endpoint!(
+    /// The account's limits, any timeout or exclusion, and what it has spent.
+    SaferGet, Get, "/account/safer", Verified, Empty => SaferPlay
+);
+endpoint!(
+    /// Set a limit: lower at once, a raise after the cooling-off.
+    SaferLimitPost, Post, "/account/safer/limit", Verified, SaferLimitSet => SaferPlay
+);
+endpoint!(
+    /// Start a timeout or an exclusion, at once and for good.
+    SaferBlockPost, Post, "/account/safer/block", Verified, SaferBlockStart => SaferPlay
+);
+endpoint!(
+    /// The wallet's signature, letting a block run past the unsigned most.
+    SaferBlockSignPost, Post, "/account/safer/block/sign", Verified, SaferBlockSign => SaferPlay
+);
+
+// --- eligibility by place (MONEY.md#eligibility) ------------------------------
+
+/// What the request's place allows. A VPN defeats it; it keeps the site from
+/// serving places the statement excludes. Never a claim or a withdrawal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Geo {
+    /// Adding funds, betting and a non-zero payout statement.
+    pub betting: bool,
+    pub sign_up: bool,
+}
+
+/// Whether a place is on a list of `CC` and `CC-RR` entries.
+fn listed(list: &str, country: &str, region: Option<&str>) -> bool {
+    list.split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .any(|e| match e.split_once('-') {
+            Some((c, r)) => {
+                c.eq_ignore_ascii_case(country) && region.is_some_and(|x| x.eq_ignore_ascii_case(r))
+            }
+            None => e.eq_ignore_ascii_case(country),
+        })
+}
+
+/// The place's eligibility under the target's lists. Empty lists block
+/// nowhere; an unknown country blocks nothing.
+pub fn geo(excluded: &str, sanctioned: &str, country: Option<&str>, region: Option<&str>) -> Geo {
+    let Some(country) = country.filter(|c| !c.is_empty()) else {
+        return Geo {
+            betting: true,
+            sign_up: true,
+        };
+    };
+    let sanctioned = listed(sanctioned, country, region);
+    Geo {
+        betting: !sanctioned && !listed(excluded, country, region),
+        sign_up: !sanctioned,
+    }
+}
+
+endpoint!(
+    /// What the caller's place allows, for the site's refusals.
+    GeoGet, Get, "/geo", Public, Empty => Geo
+);
+
+#[cfg(test)]
+mod geo_tests {
+    use super::*;
+
+    #[test]
+    fn places_are_matched_by_country_or_region() {
+        let (ex, sa) = ("US,PR", "CU,UA-43,UA-09");
+        assert_eq!(
+            geo(ex, sa, Some("US"), Some("CA")),
+            Geo {
+                betting: false,
+                sign_up: true
+            }
+        );
+        assert_eq!(
+            geo(ex, sa, Some("cu"), None),
+            Geo {
+                betting: false,
+                sign_up: false
+            }
+        );
+        assert_eq!(
+            geo(ex, sa, Some("UA"), Some("43")),
+            Geo {
+                betting: false,
+                sign_up: false
+            }
+        );
+        assert_eq!(
+            geo(ex, sa, Some("UA"), Some("30")),
+            Geo {
+                betting: true,
+                sign_up: true
+            }
+        );
+        assert_eq!(
+            geo(ex, sa, Some("IL"), None),
+            Geo {
+                betting: true,
+                sign_up: true
+            }
+        );
+        assert_eq!(
+            geo("", "", Some("US"), None),
+            Geo {
+                betting: true,
+                sign_up: true
+            },
+            "testnet"
+        );
+        assert!(geo(ex, sa, None, None).betting);
     }
 }

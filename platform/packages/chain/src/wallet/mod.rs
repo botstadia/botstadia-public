@@ -77,6 +77,11 @@ pub struct Contracts {
     pub fallback_paymaster: Option<Address>,
     /// Our settlement contract.
     pub settlement: Address,
+    /// Our standing-orders contract (MONEY.md#standing-orders), where
+    /// auto-back's money waits. None on a target without one: an older
+    /// saved setup, or the exit page before it learned of them.
+    #[serde(default)]
+    pub standing_orders: Option<Address>,
 }
 
 fn default_usdc_name() -> String {
@@ -122,6 +127,7 @@ impl Contracts {
             paymaster: address!("0x31BE08D380A21fc740883c0BC434FcFc88740b58"),
             fallback_paymaster: Some(address!("0x777777777777AeC03fd955926DbF81597e66834C")),
             settlement,
+            standing_orders: None,
         }
     }
 }
@@ -164,13 +170,18 @@ mod tests {
             .replace(
                 "{{.WALLET_FALLBACK_PAYMASTER}}",
                 &value("WALLET_FALLBACK_PAYMASTER"),
+            )
+            .replace(
+                "{{.CHAIN_TESTNET_STANDING_ORDERS}}",
+                &value("CHAIN_TESTNET_STANDING_ORDERS"),
             );
         let parsed: Contracts = serde_json::from_str(&block).unwrap();
-        let expected = Contracts::base(
+        let mut expected = Contracts::base(
             84532,
             value("CHAIN_TOKEN_TESTNET").parse().unwrap(),
             value("CHAIN_TESTNET_SETTLEMENT").parse().unwrap(),
         );
+        expected.standing_orders = Some(value("CHAIN_TESTNET_STANDING_ORDERS").parse().unwrap());
         assert_eq!(parsed, expected);
     }
 }

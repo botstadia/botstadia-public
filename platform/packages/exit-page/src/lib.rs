@@ -13,11 +13,15 @@
 //!   says how much ETH to send to the recovery key's address, and deploys it
 //!   from that key with the saved setup data.
 //!
+//! - Auto-back's money comes back too: what the standing-orders contract
+//!   holds set aside is taken back to the wallet and every order cleared, in
+//!   the same operation as the withdrawal.
+//!
 //! The defaults per chain are baked in at build (`EXIT_PAGE_CHAINS`, from
 //! `config.yml`), and the user can replace the RPC and the bundler. The key
 //! never leaves the page: it signs here.
 
-use botstadia_chain::abi::{Results, Settlement};
+use botstadia_chain::abi::{Results, Settlement, StandingOrders};
 use botstadia_chain::rpc::{BlockTag, Client, Transport};
 use botstadia_chain::sign::Key;
 use botstadia_chain::wallet::Contracts;
@@ -398,6 +402,84 @@ async fn week_pool(
     })))
 }
 
+/// Auto-back's money and orders (MONEY.md#standing-orders): what the
+/// orders contract holds set aside for the wallet, and every bot whose last
+/// order isn't cleared, from its `OrderSet` events.
+#[derive(Clone, Debug, Default)]
+struct Orders {
+    balance: U256,
+    bots: Vec<B256>,
+    /// Why the orders couldn't be listed: the money still comes back.
+    missed: Option<String>,
+}
+
+async fn orders_of(rpc: &Client<Fetch>, ch: &Chain, wallet: Address) -> anyhow::Result<Orders> {
+    use alloy_sol_types::SolEvent;
+    let Some(at) = ch.contracts.standing_orders else {
+        return Ok(Orders::default());
+    };
+    let balance: U256 = match rpc
+        .call_typed(at, &StandingOrders::balancesCall(wallet), BlockTag::Latest)
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(Orders {
+                missed: Some(format!(
+                    "what's set aside for auto-back couldn't be read: {e:#}"
+                )),
+                ..Orders::default()
+            });
+        }
+    };
+    // Nothing set aside, nothing an order can spend: no scan.
+    if balance.is_zero() {
+        return Ok(Orders::default());
+    }
+    let listed = async {
+        let head = rpc.block_number().await?;
+        let topics = json!([
+            format!("{:#x}", StandingOrders::OrderSet::SIGNATURE_HASH),
+            format!("{:#x}", B256::left_padding_from(wallet.as_slice())),
+        ]);
+        let mut live: Vec<B256> = Vec::new();
+        let mut from = ch.start_block;
+        while from <= head {
+            let to = (from + SCAN - 1).min(head);
+            for l in logs(rpc, at, from, to, &topics).await? {
+                let Some(bot) = l["topics"][2].as_str().and_then(|t| t.parse::<B256>().ok()) else {
+                    continue;
+                };
+                let data = l["data"]
+                    .as_str()
+                    .and_then(|d| d.parse::<Bytes>().ok())
+                    .unwrap_or_default();
+                let amount = data.get(..32).map(U256::from_be_slice).unwrap_or_default();
+                live.retain(|b| *b != bot);
+                if !amount.is_zero() {
+                    live.push(bot);
+                }
+            }
+            from = to + 1;
+        }
+        anyhow::Ok(live)
+    };
+    Ok(match listed.await {
+        Ok(bots) => Orders {
+            balance,
+            bots,
+            missed: None,
+        },
+        Err(e) => Orders {
+            balance,
+            bots: Vec::new(),
+            missed: Some(format!(
+                "auto-back's orders couldn't be listed, so they stay set: {e:#}"
+            )),
+        },
+    })
+}
+
 /// What the scan found, and what it couldn't read.
 struct Found {
     pools: Vec<Pool>,
@@ -574,12 +656,24 @@ pub async fn inspect(
         let deployed = code.as_str().is_some_and(|s| s.len() > 2);
         let (now, missed) = money_of(&rpc, &ch, save.wallet, deployed && !skip_claims).await?;
         let usdc = now.usdc;
+        let set_aside = match ch.contracts.standing_orders {
+            Some(at) if deployed => rpc
+                .call_typed(
+                    at,
+                    &StandingOrders::balancesCall(save.wallet),
+                    BlockTag::Latest,
+                )
+                .await
+                .ok(),
+            _ => None,
+        };
         let owners = flow::owners(&rpc, c, save.wallet, &save.setup_data).await?;
         let mut v = json!({
             "wallet": format!("{:#x}", save.wallet),
             "chain_id": save.chain_id,
             "deployed": deployed,
             "usdc": usdc.to_string(),
+            "set_aside": set_aside.map(|b| b.to_string()),
             "owners": owners.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>(),
         });
         if let Some(k) = &key {
@@ -725,20 +819,38 @@ pub async fn withdraw(
         };
         anyhow::ensure!(everything || fixed > U256::ZERO, "nothing to withdraw");
         let (now, mut missed) = money_of(&rpc, &ch, save.wallet, !skip_claims).await?;
+        let orders = orders_of(&rpc, &ch, save.wallet).await?;
+        let taken_back = orders.balance;
+        let stop = if taken_back.is_zero() && orders.bots.is_empty() {
+            Vec::new()
+        } else {
+            calls::orders_stop(c, orders.bots.clone(), taken_back)?
+        };
+        if let Some(m) = &orders.missed {
+            missed = Some(missed.map_or(m.clone(), |x| format!("{x}; {m}")));
+        }
         let claims = Claims::from_claimable(&now.claimable);
         anyhow::ensure!(
-            fixed <= now.usdc + claims.total,
+            fixed <= now.usdc + claims.total + taken_back,
             "the wallet holds less than that{}",
             missed
                 .as_ref()
                 .map(|m| format!(" ({m})"))
                 .unwrap_or_default()
         );
-        // With the claims, then without, if that didn't go out and the
-        // balance alone covers it.
-        let mut tries = vec![claims.clone()];
-        if !claims.is_empty() && fixed <= now.usdc && !now.usdc.is_zero() {
-            tries.push(Claims::default());
+        // With the claims and auto-back's money, then without the claims,
+        // then the wallet's own USDC alone, if those didn't go out and it
+        // covers the amount: a stranger filling an order between the read
+        // and the send never stops the withdrawal.
+        let mut tries = vec![(claims.clone(), true)];
+        if !claims.is_empty()
+            && fixed <= now.usdc + taken_back
+            && !(now.usdc + taken_back).is_zero()
+        {
+            tries.push((Claims::default(), true));
+        }
+        if !stop.is_empty() && fixed <= now.usdc && !now.usdc.is_zero() {
+            tries.push((Claims::default(), false));
         }
         let url = if bundler_url.is_empty() {
             ch.bundlers.first().cloned().unwrap_or_default()
@@ -760,8 +872,9 @@ pub async fn withdraw(
         };
         let signer = KeySigner(key);
         let mut last = None;
-        for claims in tries {
-            let total = now.usdc + claims.total;
+        for (claims, with_stop) in tries {
+            let back = if with_stop { taken_back } else { U256::ZERO };
+            let total = now.usdc + claims.total + back;
             let sent = std::cell::Cell::new(U256::ZERO);
             let build = |max_cost: U256| {
                 let value = if everything && max_cost == U256::MAX {
@@ -773,7 +886,8 @@ pub async fn withdraw(
                     fixed
                 };
                 sent.set(value);
-                let mut v = claims.calls(c);
+                let mut v = if with_stop { stop.clone() } else { Vec::new() };
+                v.extend(claims.calls(c));
                 v.push(calls::transfer(c, to, value.max(U256::from(1))));
                 v
             };
@@ -781,12 +895,18 @@ pub async fn withdraw(
                 Ok(r) => {
                     if let Some(e) = last.take() {
                         missed = Some(format!(
-                            "withdrawn without claiming, since with them it failed: {e:#}"
+                            "withdrawn without {}, since with them it failed: {e:#}",
+                            if with_stop {
+                                "claiming"
+                            } else {
+                                "claiming or taking back auto-back's money"
+                            }
                         ));
                     }
                     return Ok(json!({
                         "tx": format!("{:#x}", r.transaction_hash),
                         "claimed": claims.total.to_string(),
+                        "taken_back": back.to_string(),
                         "sent": sent.get().to_string(),
                         "claim_missed": missed,
                     }));
